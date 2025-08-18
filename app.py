@@ -978,8 +978,7 @@ try:
                  </div>
                 ''')
             parts.append('</div>')
-        html_str = "
-".join(parts)
+       html_str = "\n".join(parts)
 
         st.components.v1.html(html_str, height=800, scrolling=True)
         st.download_button("⬇️ Download OC_OnePager.html", data=html_str.encode('utf-8'), file_name="OC_OnePager.html", mime="text/html")
@@ -1031,8 +1030,7 @@ md_lines.append("")
 md_lines.append(
     "> Map to call sheet: Pressure answers (screens/quick/hot), Man (mesh/rubs/option/BS fade), Cover 3 (Flood/Curl-Flat/Dagger), Quarters (Posts/Benders/Scissors)."
 )
-md_text = "
-".join(md_lines)
+md_text = "\n".join(md_lines)
 
 st.download_button(
     label="⬇️ Download GamePlan_Suggestions.md",
