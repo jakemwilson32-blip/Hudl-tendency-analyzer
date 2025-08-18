@@ -6,29 +6,38 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# NEW: persistence & web utils
+import base64, json
+import urllib.request, urllib.error
+
 # -----------------------
 # Hudl Tendency Analyzer (Universal Language)
-# Streamlit one-file app
-# -----------------------
-# Usage:
-#   1) Save as app.py
-#   2) pip install streamlit pandas numpy
-#   3) streamlit run app.py
+# Full app with diagnostics, playbook library & Google Sheets sync
 # -----------------------
 
 st.set_page_config(page_title="Hudl Tendency Analyzer", layout="wide")
 st.title("🏈 Hudl Tendency Analyzer & Game-Plan Builder — Universal Terminology")
-st.caption("Upload a Hudl-style CSV to get overall & situational tendencies, then auto-generate a game-plan using universal football language.")
+st.caption("Upload a Hudl-style CSV (or Excel) to get overall & situational tendencies, diagnostics, and auto-generated game-plan notes using universal football language.")
 
 # -----------------------
 # Config & helpers
 # -----------------------
-TEMPLATE_COLS = [
+PRIMARY_COLS = [
     "PLAY_NUM","ODK","DN","DIST","YARD_LN","HASH","OFF_FORM","OFF_STR","BACKFIELD",
     "OFF_PLAY","PLAY_TYPE","PLAY_DIR","RESULT","GN_LS","EFF","DEF_FRONT","DEF_STR",
     "BLITZ","COVERAGE","QTR","MOTION","MOTION_DIR","PASSER","RECEIVER","PLAY_TYPE_RPS",
     "RUSHER","TEAM"
 ]
+
+# Alternate header spellings we often see in Hudl exports
+ALIAS_MAP = {
+    "YARD LN": "YARD_LN",
+    "GN/LS": "GN_LS",
+    "PLAY #": "PLAY_NUM",
+    "PLAY#": "PLAY_NUM",
+    "PLAY NO": "PLAY_NUM",
+    "PLAY DIR": "PLAY_DIR",
+}
 
 DIST_BUCKETS = [
     (0, 3, "short (1-3)"),
@@ -37,7 +46,7 @@ DIST_BUCKETS = [
     (11, 999, "very long (11+)"),
 ]
 
-# ---- Universal offensive concepts (no team-specific play names) ----
+# Universal offensive concepts (no team-specific names)
 OFF_PRESSURE_ANSWERS = [
     "RB/WR/TE screens",
     "quick game (slant/flat/hitch)",
@@ -62,42 +71,20 @@ OFF_C4_BEATERS = [
     "Flood variations",
     "Deep over (play-action)"
 ]
-OFF_SCREEN_FAMILY = [
-    "RB screen",
-    "WR bubble/tunnel",
-    "TE screen"
-]
-RUN_GAME = [
-    "Inside Zone",
-    "Outside Zone / Stretch",
-    "Power",
-    "Counter",
-    "Iso / Lead",
-    "Trap",
-    "Pin-pull / Toss"
-]
-
-# Optional quick reference (personnel & formations) for the UI
-UNIVERSAL_PERSONNEL = [
-    "10 (1 RB, 0 TE)", "11 (1 RB, 1 TE)", "12 (1 RB, 2 TE)",
-    "20 (2 RB, 0 TE)", "21 (2 RB, 1 TE)", "22 (2 RB, 2 TE)", "Empty"
-]
-UNIVERSAL_BASE_ALIGN = [
-    "I-Formation", "Split Backs / Pro", "Singleback",
-    "Shotgun", "Pistol", "Trips", "Bunch", "Spread", "Empty"
-]
+OFF_SCREEN_FAMILY = ["RB screen","WR bubble/tunnel","TE screen"]
+RUN_GAME = ["Inside Zone","Outside Zone / Stretch","Power","Counter","Iso / Lead","Trap","Pin-pull / Toss"]
 
 @st.cache_data(show_spinner=False)
 def template_csv_bytes() -> bytes:
-    df = pd.DataFrame(columns=TEMPLATE_COLS)
+    df = pd.DataFrame(columns=PRIMARY_COLS)
     buf = io.StringIO()
     df.to_csv(buf, index=False)
     return buf.getvalue().encode("utf-8")
 
-
+# ---- Utilities ----
 def to_bucket_dist(dist):
     try:
-        d = int(dist)
+        d = int(float(dist))
     except Exception:
         return "unknown"
     for lo, hi, name in DIST_BUCKETS:
@@ -108,24 +95,22 @@ def to_bucket_dist(dist):
 
 def normalize_play_type(row: pd.Series) -> str:
     val = str(row.get("PLAY_TYPE_RPS") or "").strip().upper()
-    if val in {"R", "RUN"}:
-        return "Run"
-    if val in {"P", "PASS"}:
-        return "Pass"
-    if val in {"S", "SCREEN"}:
-        return "Screen"
+    if val in {"R", "RUN"}: return "Run"
+    if val in {"P", "PASS"}: return "Pass"
+    if val in {"S", "SCREEN"}: return "Screen"
     t = str(row.get("PLAY_TYPE") or "").lower()
-    if "screen" in t:
-        return "Screen"
-    if "pass" in t:
-        return "Pass"
-    if "run" in t or t in {"ko", "po", "rush"}:
-        return "Run"
+    if "screen" in t: return "Screen"
+    if "pass" in t: return "Pass"
+    if "run" in t or t in {"ko","po","rush"}: return "Run"
+    # Try OFF_PLAY keywords
+    op = str(row.get("OFF_PLAY") or "").lower()
+    if any(k in op for k in ["screen","bubble","tunnel"]): return "Screen"
+    if any(k in op for k in ["pass","boot","play-action","pa "]): return "Pass"
+    if any(k in op for k in ["zone","power","counter","iso","trap","toss","draw","run"]): return "Run"
     return "Unknown"
 
 
 def left_mid_right(s) -> str:
-    # Handle NaN, numerics, and strings safely
     if pd.isna(s):
         return "Unknown"
     try:
@@ -134,80 +119,141 @@ def left_mid_right(s) -> str:
     except Exception:
         pass
     s = str(s).strip().lower()
-    if not s:
-        return "Unknown"
-    if s in {"l","lt","left"} or s.startswith("l"):
-        return "Left"
-    if s in {"r","rt","right"} or s.startswith("r"):
-        return "Right"
-    if s in {"m","mid","middle","inside","in","center","ctr"} or s.startswith(("m","i")):
-        return "Middle"
+    if not s: return "Unknown"
+    if s in {"l","lt","left"} or s.startswith("l"): return "Left"
+    if s in {"r","rt","right"} or s.startswith("r"): return "Right"
+    if s in {"m","mid","middle","inside","in","center","ctr"} or s.startswith(("m","i")): return "Middle"
     return "Unknown"
 
 
 def red_zone_flag(yard_ln: float) -> str:
-    if pd.isna(yard_ln):
-        return "no"
+    if pd.isna(yard_ln): return "no"
     return "yes" if 1 <= yard_ln <= 20 else "no"
 
 
 def field_zone(yard_ln: float) -> str:
-    # yard line: negative = own, positive = opponent; 0 ~ midfield
-    if pd.isna(yard_ln):
-        return "unknown"
+    if pd.isna(yard_ln): return "unknown"
     yl = yard_ln
-    if yl <= -90:
-        return "own 10 and in"
-    if -89 <= yl <= -21:
-        return "own territory (21-49)"
-    if -20 <= yl <= -1:
-        return "near midfield (own 1-20)"
-    if 0 <= yl <= 20:
-        return "midfield (50 +/- 20)"
-    if 21 <= yl <= 35:
-        return "plus territory (35-21)"
-    if 36 <= yl <= 50:
-        return "scoring fringe (20-34)"
-    if 1 <= yl <= 20:
-        return "red zone (20 and in)"
+    if yl <= -90: return "own 10 and in"
+    if -89 <= yl <= -21: return "own territory (21-49)"
+    if -20 <= yl <= -1: return "near midfield (own 1-20)"
+    if 0 <= yl <= 20: return "midfield (50 +/- 20)"
+    if 21 <= yl <= 35: return "plus territory (35-21)"
+    if 36 <= yl <= 50: return "scoring fringe (20-34)"
+    if 1 <= yl <= 20: return "red zone (20 and in)"
     return "unknown"
 
 
 def tendency_table(df: pd.DataFrame, dims, outcome_col="PLAY_TYPE_NORM"):
-    # Robust % calc using transform so index aligns with g
     if df is None or len(df) == 0:
         return pd.DataFrame(columns=dims + [outcome_col, "plays", "%"])
     g = df.groupby(dims + [outcome_col], dropna=False).size().reset_index(name="plays")
-    denom = g.groupby(dims)["plays"].transform("sum").replace(0, np.nan)
-    g["%"] = ((100 * g["plays"] / denom).round(1)).fillna(0)
+    den = g.groupby(dims)["plays"].transform("sum").replace(0, np.nan)
+    g["%"] = ((100 * g["plays"] / den).round(1)).fillna(0)
     return g.sort_values(dims + ["plays"], ascending=[True]*len(dims) + [False])
 
 
 def compute_blitz_rate(df: pd.DataFrame, dims):
+    if len(df) == 0:
+        return pd.DataFrame(columns=dims + ["blitz_rate","plays","blitz_rate%"])
     g = df.copy()
     g["BLITZ_FLAG"] = g["BLITZ"].astype(str).str.lower().isin(["1","y","yes","t","true"])
-    tbl = g.groupby(dims)["BLITZ_FLAG"].agg(["mean","count"]).reset_index()
+    tbl = g.groupby(dims, dropna=False)["BLITZ_FLAG"].agg(["mean","count"]).reset_index()
     tbl.rename(columns={"mean":"blitz_rate","count":"plays"}, inplace=True)
     tbl["blitz_rate%"] = (100 * tbl["blitz_rate"]).round(1)
     return tbl.sort_values(["plays"], ascending=False)
 
 
 def compute_coverage(df: pd.DataFrame, dims):
+    if len(df) == 0:
+        return pd.DataFrame(columns=dims + ["COVERAGE_N","plays","%"])
     g = df.copy()
     g["COVERAGE_N"] = g["COVERAGE"].fillna("Unknown").astype(str).str.upper()
-    tbl = g.groupby(dims + ["COVERAGE_N"]).size().reset_index(name="plays")
-  den = tbl.groupby(dims)["plays"].transform("sum").replace(0, np.nan)
-tbl["%"] = ((100 * tbl["plays"] / den).round(1)).fillna(0)
+    tbl = g.groupby(dims + ["COVERAGE_N"], dropna=False).size().reset_index(name="plays")
+    den = tbl.groupby(dims)["plays"].transform("sum").replace(0, np.nan)
+    tbl["%"] = ((100 * tbl["plays"] / den).round(1)).fillna(0)
     return tbl.sort_values(dims + ["plays"], ascending=[True]*len(dims) + [False])
 
 
 def safe_rate(n, d):
     return (n / d) if d else 0.0
 
+# Success & explosive heuristics from GN_LS (gain/loss)
+def coerce_gain(val):
+    try:
+        return float(val)
+    except Exception:
+        # sometimes in Hudl it's like "+7" or "-2"
+        s = str(val).replace("+", "").strip()
+        try:
+            return float(s)
+        except Exception:
+            return np.nan
 
-def build_suggestions(overall, by_down, by_dist, by_form, blitz_3rd, cov_3rd, hash_tbl, motion_tbl):
+
+# ---------- Playbook persistence helpers ----------
+PLAYBOOK_COLS = [
+    "PLAY_NAME","PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS","COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"
+]
+
+@st.cache_data(show_spinner=False)
+def play_index_template_bytes() -> bytes:
+    df = pd.DataFrame(columns=PLAYBOOK_COLS)
+    buf = io.StringIO(); df.to_csv(buf, index=False); return buf.getvalue().encode("utf-8")
+
+# serialize images to base64 so playbook.json can persist them
+
+def serialize_playbook(pb: dict) -> dict:
+    out = {
+        'plays': pb.get('plays', []),
+        'images': {},
+        'sheets_csv_url': st.session_state.get('SHEETS_CSV_URL', ''),
+        'sheets_write_url': st.session_state.get('SHEETS_WRITE_URL', ''),
+    }
+    for fname, b in pb.get('images', {}).items():
+        try:
+            out['images'][fname] = base64.b64encode(b).decode('utf-8')
+        except Exception:
+            pass
+    return out
+
+
+def deserialize_playbook(pb_json: dict) -> dict:
+    pb = {'plays': pb_json.get('plays', []), 'images': {}}
+    for fname, s in pb_json.get('images', {}).items():
+        try:
+            pb['images'][fname] = base64.b64decode(s.encode('utf-8'))
+        except Exception:
+            pass
+    # restore sheet URLs
+    st.session_state['SHEETS_CSV_URL'] = pb_json.get('sheets_csv_url', '')
+    st.session_state['SHEETS_WRITE_URL'] = pb_json.get('sheets_write_url', '')
+    return pb
+
+
+def load_playbook_from_sheets_csv(url: str) -> pd.DataFrame:
+    # expects a Google Sheets "Publish to the web" CSV URL
+    return pd.read_csv(url)
+
+
+def push_playbook_to_webhook(url: str, rows: list) -> str:
+    # Posts JSON to a Google Apps Script web app (see instructions in chat)
+    payload = json.dumps({ 'rows': rows, 'replace': True, 'columns': PLAYBOOK_COLS }).encode('utf-8')
+    req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return resp.read().decode('utf-8')
+
+
+# ---------- Suggestions builder ----------
+
+def build_suggestions(overall, by_down, by_dist, by_form, blitz_3rd, cov_3rd, hash_tbl, motion_tbl, sample_size, sr_overall, xpl_overall):
     suggestions = []
 
+    # Sample size guardrails
+    if sample_size < 25:
+        suggestions.append(f"Warning: small sample ({sample_size} plays). Treat tendencies with caution.")
+
+    # Overall run/pass/screen
     total = overall["plays"].sum() if len(overall) else 0
     rp = overall[overall["PLAY_TYPE_NORM"].isin(["Run","Pass","Screen"])]
     run_p = safe_rate(rp[rp["PLAY_TYPE_NORM"]=="Run"]["plays"].sum(), total)
@@ -215,74 +261,82 @@ def build_suggestions(overall, by_down, by_dist, by_form, blitz_3rd, cov_3rd, ha
     screen_p = safe_rate(rp[rp["PLAY_TYPE_NORM"]=="Screen"]["plays"].sum(), total)
 
     if run_p >= 0.60:
-        suggestions.append(f"Run-heavy profile overall ({run_p:.0%}). Defensively: add an extra fitter on early downs. Offensively: plan play-action off base runs.")
+        suggestions.append(f"Run-heavy profile overall ({run_p:.0%}). Def: extra fitter on early downs; Off: play-action shots.")
     elif pass_p >= 0.60:
-        suggestions.append(f"Pass-heavy profile overall ({pass_p:.0%}). Defensively: mix simulated pressures and rotate late from two-high shells.")
+        suggestions.append(f"Pass-heavy profile overall ({pass_p:.0%}). Def: simulated pressures, late rotation from two-high.")
     if screen_p >= 0.10:
-        suggestions.append(f"Screens show up {screen_p:.0%}. DL: retrace and affect throw lanes. Offense: keep screen menu ready (RB/WR/TE).")
+        suggestions.append(f"Screens appear {screen_p:.0%}. DL retrace; keep RB/WR/TE screen menu ready.")
 
+    # Efficiency context
+    if not np.isnan(sr_overall):
+        suggestions.append(f"Estimated success rate: {sr_overall:.0%} (success = gain ≥ yard-to-go on 1st/2nd, or conversion on 3rd).")
+    if not np.isnan(xpl_overall):
+        suggestions.append(f"Explosive rate: {xpl_overall:.0%} (10+ rush / 15+ pass).")
+
+    # Down tendencies
     for d in [1,2,3]:
         sub = by_down[by_down["DN"]==d]
         if len(sub):
             r = sub[sub["PLAY_TYPE_NORM"]=="Run"]["%"].sum() if "Run" in set(sub["PLAY_TYPE_NORM"]) else 0
             p = sub[sub["PLAY_TYPE_NORM"]=="Pass"]["%"].sum() if "Pass" in set(sub["PLAY_TYPE_NORM"]) else 0
             if d==1 and r>=60:
-                suggestions.append("First down leans run. Fit downhill and stay alert for early down play-action shots.")
+                suggestions.append("1st down leans run. Fit downhill; be alert for play-action off base runs.")
             if d==3 and p>=70:
-                suggestions.append("Third down leans pass. Defense: simulated pressure, play the sticks. Offense: quick man/zone beaters.")
+                suggestions.append("3rd down leans pass. Def: simulated pressure, play the sticks. Off: quick man/zone beaters.")
 
+    # Distance tendencies (3rd down)
     td = by_dist[(by_dist["DN"]==3)]
     if len(td):
         long_pass = td[(td["DIST_BUCKET"]=="long (7-10)") & (td["PLAY_TYPE_NORM"]=="Pass")]
         if len(long_pass) and long_pass["%"].iloc[0] >= 70:
-            suggestions.append("3rd & 7–10 high pass tendency. Offense: 3-level Flood/Sail or Dagger. Defense: mug A-gaps, spin to 3-robber.")
+            suggestions.append("3rd & 7–10 high pass tendency. Off: Flood/Sail or Dagger. Def: mug A-gaps, spin to 3-robber.")
         vl_pass = td[(td["DIST_BUCKET"]=="very long (11+)") & (td["PLAY_TYPE_NORM"]=="Pass")]
         if len(vl_pass) and vl_pass["%"].iloc[0] >= 80:
-            suggestions.append("3rd & 11+ = must-pass. Spy QB if mobile. Offense: shot plays off max protection vs soft zone.")
+            suggestions.append("3rd & 11+ = must-pass. Spy QB if mobile; Off: max-protect shots vs soft zone.")
 
+    # By formation tendencies (top formation)
     if len(by_form):
         top_form = by_form.groupby(["OFF_FORM"])["plays"].sum().reset_index().sort_values("plays", ascending=False).head(1)
         if len(top_form):
-            f = top_form["OFF_FORM"].iloc[0]
+            f = str(top_form["OFF_FORM"].iloc[0])
             f_tbl = by_form[by_form["OFF_FORM"]==f]
             run_bias = f_tbl[f_tbl["PLAY_TYPE_NORM"]=="Run"]["%"].sum() if "Run" in set(f_tbl["PLAY_TYPE_NORM"]) else 0
             if run_bias >= 65:
-                suggestions.append(f"In {f}, strong run tendency (~{run_bias:.0f}%). Defensively: set edges, close interior gaps. Offensively: plan play-action counters from same look.")
+                suggestions.append(f"In {f}, strong run tendency (~{run_bias:.0f}%). Def: set edges, close interior gaps. Off: play-action counters from same look.")
 
-    if len(blitz_3rd):
-        high_blitz = blitz_3rd[blitz_3rd["blitz_rate"]>=0.35]
-        if len(high_blitz):
-            suggestions.append("They pressure on 3rd (≥35%). Offense: screens, quick game, and hot throws; consider max-protect shots.")
+    # Blitz on 3rd down
+    if len(blitz_3rd) and (blitz_3rd["blitz_rate"] >= 0.35).any():
+        suggestions.append("They pressure on 3rd (≥35%). Off: screens, quick game, hot throws; consider max-protect shots.")
 
+    # Coverage on 3rd down
     if len(cov_3rd):
         top_cov = cov_3rd.groupby(["COVERAGE_N"])["plays"].sum().reset_index().sort_values("plays", ascending=False).head(1)
         if len(top_cov):
             cov = top_cov["COVERAGE_N"].iloc[0]
             if cov in {"COVER 1","C1","MAN","COVER1"}:
-                suggestions.append("3rd-down = Man. Offense: Mesh, rub/stack releases, option routes, back-shoulder fades.")
+                suggestions.append("3rd = Man. Off: Mesh, rub/stack, option routes, back-shoulder.")
             if cov in {"COVER 3","C3","THREE","COVER3"}:
-                suggestions.append("3rd-down = Cover 3 (MOFC). Offense: Flood/Sail, Curl/Flat, Dagger; attack seams and curl window.")
+                suggestions.append("3rd = Cover 3 (MOFC). Off: Flood/Sail, Curl-Flat, Dagger; attack seams/curl window.")
             if cov in {"COVER 4","C4","QUARTERS"}:
-                suggestions.append("3rd-down = Quarters. Offense: posts & benders, scissors (post+corner), deep overs.")
+                suggestions.append("3rd = Quarters. Off: posts & benders, scissors, deep overs.")
 
+    # Hash tendencies
     if len(hash_tbl):
         left = hash_tbl[hash_tbl["HASH_N"]=="L"]["%"].sum() if any(hash_tbl["HASH_N"]=="L") else 0
         right = hash_tbl[hash_tbl["HASH_N"]=="R"]["%"].sum() if any(hash_tbl["HASH_N"]=="R") else 0
         if left >= 55:
-            suggestions.append("Left-hash bias. Offense: set strength to the field and run to space; Defense: set strength to boundary and fit fast to field.")
+            suggestions.append("Left-hash bias. Off: set strength to field; Def: set strength to boundary, fit fast to field.")
         if right >= 55:
-            suggestions.append("Right-hash bias. Offense: formation to the field, use field-side RPO/screens; Defense: rotate down to wide side.")
+            suggestions.append("Right-hash bias. Off: formation into field with RPO/screens; Def: rotate down to wide side.")
 
-    if len(motion_tbl):
-        high_motion = motion_tbl[motion_tbl["%"]>=50]
-        if len(high_motion):
-            suggestions.append("Heavy motion usage. Offense: use motion to ID coverage and leverage; Defense: bump/roll with motion, avoid over-rotating.")
+    # Motion tendencies
+    if len(motion_tbl) and (motion_tbl["%"] >= 50).any():
+        suggestions.append("Heavy motion usage. Off: use motion to ID coverage/leverage; Def: bump/roll with motion.")
 
     if not suggestions:
         suggestions.append("Tendencies balanced. Build a call sheet with answers by situation: pressure answers, man beaters, Cover 3/Quarters concepts, and screen menu.")
 
     return suggestions
-
 
 # -----------------------
 # Sidebar controls
@@ -298,26 +352,31 @@ st.sidebar.download_button(
     mime="text/csv",
 )
 
-st.sidebar.markdown("**Universal Personnel**: " + ", ".join(UNIVERSAL_PERSONNEL))
-st.sidebar.markdown("**Base Alignments**: " + ", ".join(UNIVERSAL_BASE_ALIGN))
-
 # -----------------------
 # File upload
 # -----------------------
-file = st.file_uploader("Upload Hudl-style CSV", type=["csv"]) 
+file = st.file_uploader("Upload Hudl-style CSV or Excel", type=["csv","xls","xlsx"]) 
 
 if not file:
-    st.info("Upload a CSV with the headers from the template to begin.")
+    st.info("Upload a CSV/Excel with the headers from the template to begin.")
     st.stop()
 
-# Read & normalize
-raw = pd.read_csv(file)
-for required in TEMPLATE_COLS:
-    if required not in raw.columns:
-        raw[required] = np.nan
+# Read & standardize headers
+if file.name.lower().endswith((".xls",".xlsx")):
+    raw = pd.read_excel(file)
+else:
+    raw = pd.read_csv(file)
 
-# Coerce select numeric columns
-for col in ["DN","DIST","YARD_LN","QTR"]:
+# Rename aliases to primary
+raw = raw.rename(columns={k:v for k,v in ALIAS_MAP.items() if k in raw.columns})
+
+# Ensure all primary columns exist
+for c in PRIMARY_COLS:
+    if c not in raw.columns:
+        raw[c] = np.nan
+
+# Coerce key numerics
+for col in ["DN","DIST","YARD_LN","QTR","GN_LS"]:
     raw[col] = pd.to_numeric(raw[col], errors="coerce")
 
 # Derivations
@@ -328,10 +387,51 @@ raw["HASH_N"] = raw["HASH"].astype(str).str.upper().str[0].map({"L":"L","R":"R",
 raw["RED_ZONE"] = raw["YARD_LN"].apply(red_zone_flag)
 raw["FIELD_ZONE"] = raw["YARD_LN"].apply(field_zone)
 
-# Overall tendencies
+# Derive gains if provided in alias column
+if "GN/LS" in raw.columns and raw["GN_LS"].isna().all():
+    raw["GN_LS"] = raw["GN/LS"].apply(coerce_gain)
+
+# Success rate heuristic (needs DN, DIST, GN_LS)
+# success: on 1st, gain >= 0.5*to-go; on 2nd, gain >= 0.7*to-go; on 3rd/4th, gain >= to-go
+def success_row(r):
+    dn, dist, g = r.get("DN"), r.get("DIST"), r.get("GN_LS")
+    if pd.isna(dn) or pd.isna(dist) or pd.isna(g):
+        return np.nan
+    try:
+        dn = int(dn); dist = float(dist); g = float(g)
+    except Exception:
+        return np.nan
+    if dn == 1:
+        return g >= 0.5*dist
+    if dn == 2:
+        return g >= 0.7*dist
+    return g >= dist
+
+raw["SUCCESS"] = raw.apply(success_row, axis=1)
+
+# Explosive rate heuristic (10+ rush, 15+ pass)
+raw["EXPLOSIVE"] = False
+raw.loc[(raw["PLAY_TYPE_NORM"]=="Run") & (raw["GN_LS"] >= 10), "EXPLOSIVE"] = True
+raw.loc[(raw["PLAY_TYPE_NORM"]=="Pass") & (raw["GN_LS"] >= 15), "EXPLOSIVE"] = True
+
+# --- Diagnostics ---
+st.subheader("Data Diagnostics")
+key_cols = ["DN","DIST","YARD_LN","HASH","PLAY_TYPE","PLAY_TYPE_RPS","OFF_FORM","OFF_STR","BACKFIELD","PLAY_DIR","BLITZ","COVERAGE","MOTION","GN_LS"]
+missing = [c for c in key_cols if raw[c].isna().all()]
+non_null_counts = raw[key_cols].notna().sum().to_frame("non-null").T
+st.write("**Non-null counts (how much data do we have by column):**")
+st.dataframe(non_null_counts)
+if missing:
+    st.warning("No data found in: " + ", ".join(missing))
+
+# --- Overall tendencies ---
 overall = raw.groupby(["PLAY_TYPE_NORM"]).size().reset_index(name="plays")
 if len(overall):
     overall["%"] = (100 * overall["plays"] / overall["plays"].sum()).round(1)
+
+sample_size = int(overall["plays"].sum()) if len(overall) else int(len(raw))
+sr_overall = raw["SUCCESS"].mean() if raw["SUCCESS"].notna().any() else np.nan
+xpl_overall = raw["EXPLOSIVE"].mean() if raw["GN_LS"].notna().any() else np.nan
 
 # Grouped tables
 by_down = tendency_table(raw, ["DN"])            # DN x PLAY_TYPE
@@ -348,71 +448,93 @@ cov_3rd = compute_coverage(raw[raw["DN"]==3], ["DIST_BUCKET"])       # 3rd down 
 # Motion usage
 motion_tbl = raw.copy()
 motion_tbl["MOTION_N"] = np.where(motion_tbl["MOTION"].astype(str).str.strip().eq(""), "None", "Motion")
-motion_tbl = motion_tbl.groupby(["MOTION_N","PLAY_TYPE_NORM"]).size().reset_index(name="plays")
-den = motion_tbl.groupby(["MOTION_N"])["plays"].transform("sum").replace(0, np.nan)
+motion_tbl = motion_tbl.groupby(["MOTION_N","PLAY_TYPE_NORM"], dropna=False).size().reset_index(name="plays")
+den = motion_tbl.groupby(["MOTION_N"])['plays'].transform('sum').replace(0, np.nan)
 motion_tbl["%"] = ((100 * motion_tbl["plays"] / den).round(1)).fillna(0)
-
 
 # -----------------------
 # Visuals & Tables
 # -----------------------
 st.subheader("Overview")
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
     st.markdown("**Run/Pass/Screen Mix**")
-    st.dataframe(overall)
-    if show_charts and len(overall):
-        chart_df = overall.set_index("PLAY_TYPE_NORM")["plays"]
-        st.bar_chart(chart_df)
+    if len(overall):
+        st.dataframe(overall)
+        if show_charts:
+            st.bar_chart(overall.set_index("PLAY_TYPE_NORM")["plays"])
+    else:
+        st.info("No PLAY_TYPE found. Check columns PLAY_TYPE or PLAY_TYPE_RPS or OFF_PLAY keywords.")
 with col2:
     st.markdown("**Direction (L/M/R)**")
-    st.dataframe(by_dir)
+    if len(by_dir): st.dataframe(by_dir)
+    else: st.info("No direction data (PLAY_DIR) present.")
+with col3:
+    st.markdown("**Efficiency**")
+    eff_lines = []
+    if not np.isnan(sr_overall): eff_lines.append(f"Success rate: {sr_overall:.0%}")
+    if not np.isnan(xpl_overall): eff_lines.append(f"Explosive rate: {xpl_overall:.0%}")
+    if eff_lines:
+        st.write("\n".join(eff_lines))
+    else:
+        st.info("Add GN_LS (gain/loss) to compute success & explosive rates.")
 
 st.divider()
 
 st.subheader("Situational Tendencies")
-exp = st.expander("By Down")
+exp = st.expander("By Down", expanded=True)
 with exp:
-    st.dataframe(by_down)
-    if show_charts and len(by_down):
-        pivot = by_down.pivot_table(index="DN", columns="PLAY_TYPE_NORM", values="%", fill_value=0)
-        st.bar_chart(pivot)
+    if len(by_down):
+        st.dataframe(by_down)
+        if show_charts:
+            pivot = by_down.pivot_table(index="DN", columns="PLAY_TYPE_NORM", values="%", fill_value=0)
+            st.bar_chart(pivot)
+    else:
+        st.info("Missing DN or PLAY_TYPE.")
 
 exp = st.expander("By Down & Distance")
 with exp:
-    st.dataframe(by_dist)
+    if len(by_dist): st.dataframe(by_dist)
+    else: st.info("Missing DIST (yards to go) or PLAY_TYPE.")
 
 exp = st.expander("By Formation / Strength / Backfield")
 with exp:
-    st.dataframe(by_form)
+    if len(by_form): st.dataframe(by_form)
+    else: st.info("Missing OFF_FORM / OFF_STR / BACKFIELD.")
 
 c1, c2 = st.columns(2)
 with c1:
     st.markdown("**By Hash**")
-    st.dataframe(by_hash)
+    if len(by_hash): st.dataframe(by_hash)
+    else: st.info("Missing HASH.")
 with c2:
     st.markdown("**By Field Zone**")
-    st.dataframe(by_fz)
+    if len(by_fz): st.dataframe(by_fz)
+    else: st.info("Missing YARD_LN.")
 
 st.markdown("**Red Zone by Down**")
-st.dataframe(by_rz)
+if len(by_rz): st.dataframe(by_rz)
+else: st.info("No red-zone snaps detected (YARD_LN 1–20).")
 
 st.subheader("3rd Down Study")
 cc1, cc2 = st.columns(2)
 with cc1:
     st.markdown("**Blitz Rate (3rd Down)**")
-    st.dataframe(blitz_3rd)
+    if len(blitz_3rd): st.dataframe(blitz_3rd)
+    else: st.info("Need BLITZ flags on 3rd down to compute.")
 with cc2:
     st.markdown("**Coverage Usage (3rd Down)**")
-    st.dataframe(cov_3rd)
+    if len(cov_3rd): st.dataframe(cov_3rd)
+    else: st.info("Need COVERAGE values on 3rd down to compute.")
 
 st.subheader("Motion Usage")
-st.dataframe(motion_tbl)
+if len(motion_tbl): st.dataframe(motion_tbl)
+else: st.info("No motion data found.")
 
 # -----------------------
 # Suggestions & Call Sheet (Universal)
 # -----------------------
-suggestions = build_suggestions(overall, by_down, by_dist, by_form, blitz_3rd, cov_3rd, by_hash, motion_tbl)
+suggestions = build_suggestions(overall, by_down, by_dist, by_form, blitz_3rd, cov_3rd, by_hash, motion_tbl, sample_size, sr_overall, xpl_overall)
 
 st.subheader("Auto-Generated Game-Plan Suggestions (Universal)")
 for s in suggestions:
@@ -426,6 +548,157 @@ st.markdown("**Vs Cover 3 (MOFC):** " + ", ".join(OFF_C3_BEATERS))
 st.markdown("**Vs Quarters:** " + ", ".join(OFF_C4_BEATERS))
 st.markdown("**Screen Menu:** " + ", ".join(OFF_SCREEN_FAMILY))
 st.markdown("**Run Game:** " + ", ".join(RUN_GAME))
+
+# -----------------------
+# Playbook Library — Upload once, reuse forever (with Google Sheets sync)
+# -----------------------
+
+st.subheader("Playbook Library — Upload once, reuse forever")
+
+# Session defaults
+if 'PLAYBOOK' not in st.session_state:
+    st.session_state.PLAYBOOK = { 'plays': [], 'images': {} }
+if 'SHEETS_CSV_URL' not in st.session_state:
+    st.session_state.SHEETS_CSV_URL = ''
+if 'SHEETS_WRITE_URL' not in st.session_state:
+    st.session_state.SHEETS_WRITE_URL = ''
+
+col_pb1, col_pb2 = st.columns([2,1])
+with col_pb1:
+    st.markdown("**A) Load or build your library**")
+    playbook_json_file = st.file_uploader("Load playbook.json (optional)", type=["json"], key="pbjson")
+    if playbook_json_file:
+        try:
+            pb = json.loads(playbook_json_file.read().decode('utf-8'))
+            st.session_state.PLAYBOOK = deserialize_playbook(pb)
+            st.success(f"Loaded {len(st.session_state.PLAYBOOK.get('plays', []))} plays from your library.")
+        except Exception as e:
+            st.error(f"Couldn't load playbook.json: {e}")
+
+    st.markdown("**Upload play images** (PNG/JPG). Name files to match FILE_NAME in your index.")
+    img_files = st.file_uploader("Add play screenshots/diagrams", type=["png","jpg","jpeg"], accept_multiple_files=True, key="pbimgs")
+    if img_files:
+        for f in img_files:
+            st.session_state.PLAYBOOK['images'][f.name] = f.read()
+        st.success(f"Stored {len(img_files)} image(s) in your library (in-memory).")
+
+    st.markdown("**Index your plays with a CSV** (or add rows manually).")
+    st.download_button("Download Play Index CSV Template", data=play_index_template_bytes(), file_name="play_index_template.csv", mime="text/csv")
+    play_index_csv = st.file_uploader("Upload play_index.csv (columns: " + ", ".join(PLAYBOOK_COLS) + ")", type=["csv"], key="pbidx")
+    if play_index_csv:
+        try:
+            df_idx = pd.read_csv(play_index_csv)
+            missing_cols = [c for c in PLAYBOOK_COLS if c not in df_idx.columns]
+            if missing_cols:
+                st.error("Missing columns in play_index.csv: " + ", ".join(missing_cols))
+            else:
+                rows = df_idx.to_dict(orient='records')
+                st.session_state.PLAYBOOK['plays'] = rows
+                st.success(f"Indexed {len(rows)} plays.")
+        except Exception as e:
+            st.error(f"Could not read play_index.csv: {e}")
+
+    st.markdown("**Save your playbook** (download a .json to reuse later)")
+    pb_bytes = json.dumps(serialize_playbook(st.session_state.PLAYBOOK)).encode('utf-8')
+    st.download_button("⬇️ Save Playbook Library (playbook.json)", data=pb_bytes, file_name="playbook.json", mime="application/json")
+
+with col_pb2:
+    st.markdown("**B) Google Sheets Sync (optional)**")
+    st.caption("No installs. Use a Google Sheet as your play index. 'Publish to web' → paste CSV link below.")
+    sheets_url = st.text_input("Google Sheets — Published CSV URL (read-only)", value=st.session_state.get('SHEETS_CSV_URL',''), placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?gid=0&single=true&output=csv")
+    if st.button("Load from Google Sheets"):
+        try:
+            df_idx = load_playbook_from_sheets_csv(sheets_url)
+            missing_cols = [c for c in PLAYBOOK_COLS if c not in df_idx.columns]
+            if missing_cols:
+                st.error("Your sheet is missing columns: " + ", ".join(missing_cols))
+            else:
+                st.session_state.PLAYBOOK['plays'] = df_idx.to_dict(orient='records')
+                st.session_state.SHEETS_CSV_URL = sheets_url
+                st.success(f"Loaded {len(df_idx)} plays from Google Sheets.")
+        except Exception as e:
+            st.error(f"Couldn't load Google Sheets CSV: {e}")
+
+    writer_url = st.text_input("Google Apps Script Web App URL (for Save → Sheets, optional)", value=st.session_state.get('SHEETS_WRITE_URL',''), placeholder="https://script.google.com/macros/s/AKfycb.../exec")
+    if st.button("Push library to Google Sheets"):
+        try:
+            resp = push_playbook_to_webhook(writer_url, st.session_state.PLAYBOOK.get('plays', []))
+            st.session_state.SHEETS_WRITE_URL = writer_url
+            st.success("Pushed to Google Sheets. Response: " + str(resp)[:200])
+        except Exception as e:
+            st.error(f"Push failed: {e}")
+
+    st.markdown("**Quick Add (single play)**")
+    with st.form("quick_add_play"):
+        qa_name = st.text_input("Play Name")
+        qa_personnel = st.text_input("Personnel (e.g., 11, 12, 20)")
+        qa_form = st.text_input("Formation (e.g., Trips, Bunch, Singleback)")
+        qa_strength = st.text_input("Strength (Right/Left/Boundary/Field)")
+        qa_concepts = st.text_input("Concept tags (comma-separated: Flood, Mesh, Curl-Flat, PA, Boot, RPO, IZ, OZ, Power, Counter)")
+        qa_situ = st.text_input("Situation tags (3rd&7-10, 1st&10, RZ, 2-minute, vs Nickel)")
+        qa_cov = st.text_input("Coverage tags (vs Man, vs C3, vs Quarters)")
+        qa_press = st.text_input("Pressure tags (vs Blitz, vs 5-man, vs DB blitz)")
+        qa_file = st.text_input("Image file name (must match an uploaded image)")
+        submitted = st.form_submit_button("Add Play")
+        if submitted:
+            st.session_state.PLAYBOOK['plays'].append({
+                'PLAY_NAME': qa_name,
+                'PERSONNEL': qa_personnel,
+                'FORMATION': qa_form,
+                'STRENGTH': qa_strength,
+                'CONCEPT_TAGS': qa_concepts,
+                'SITUATION_TAGS': qa_situ,
+                'COVERAGE_TAGS': qa_cov,
+                'PRESSURE_TAGS': qa_press,
+                'FILE_NAME': qa_file,
+            })
+            st.success(f"Added play: {qa_name}")
+
+# Build desired tags from tendencies
+want_tags = set()
+if len(cov_3rd):
+    top_cov = cov_3rd.groupby(["COVERAGE_N"])['plays'].sum().reset_index().sort_values('plays', ascending=False).head(1)
+    if len(top_cov):
+        cov = top_cov['COVERAGE_N'].iloc[0]
+        if cov in {"COVER 1","C1","MAN","COVER1"}: want_tags.update({"mesh","rub","option","back-shoulder","slant-flat"})
+        if cov in {"COVER 3","C3","THREE","COVER3"}: want_tags.update({"flood","sail","curl-flat","dagger","seam"})
+        if cov in {"COVER 4","C4","QUARTERS"}: want_tags.update({"posts","bender","scissors","deep over"})
+if len(blitz_3rd) and (blitz_3rd['blitz_rate'] >= 0.35).any():
+    want_tags.update({"screen","rb screen","wr bubble","te screen","quick","hot","max protect"})
+td = by_dist[(by_dist['DN']==3)]
+if len(td) and len(td[(td['DIST_BUCKET']=="long (7-10)") & (td['PLAY_TYPE_NORM']=="Pass")]):
+    want_tags.update({"flood","dagger","sail","curl-flat"})
+
+# Match user plays by tags
+user_plays = st.session_state.PLAYBOOK.get('plays', [])
+
+def tag_match(play_row: dict, want_tags: set) -> bool:
+    hay = " ".join([
+        str(play_row.get('CONCEPT_TAGS','')),
+        str(play_row.get('SITUATION_TAGS','')),
+        str(play_row.get('COVERAGE_TAGS','')),
+        str(play_row.get('PRESSURE_TAGS','')),
+    ]).lower()
+    return any(tag in hay for tag in want_tags)
+
+matched = [p for p in user_plays if tag_match(p, want_tags)]
+
+st.subheader("Auto-Generated Game-Plan Suggestions (Universal)")
+for s in suggestions:
+    st.markdown(f"- {s}")
+
+st.markdown("### Your Call Sheet — Suggested Plays from Your Library")
+if matched:
+    dfm = pd.DataFrame(matched)
+    st.dataframe(dfm)
+    show_imgs = st.checkbox("Show play images", value=False)
+    if show_imgs:
+        for row in matched[:12]:
+            fname = row.get('FILE_NAME')
+            if fname and fname in st.session_state.PLAYBOOK.get('images', {}):
+                st.image(st.session_state.PLAYBOOK['images'][fname], caption=row.get('PLAY_NAME', fname), use_column_width=True)
+else:
+    st.info("No matching plays yet. Upload your play images and index them with tags (use the template), or load from Google Sheets.")
 
 # -----------------------
 # Exports (CSVs + Markdown)
@@ -450,6 +723,8 @@ md_lines.append("")
 md_lines.append("## Overview")
 for _, r in overall.sort_values("plays", ascending=False).iterrows():
     md_lines.append(f"- {r['PLAY_TYPE_NORM']}: {int(r['plays'])} plays ({r['%']}%)")
+if not np.isnan(sr_overall): md_lines.append(f"- Success rate: {sr_overall:.0%}")
+if not np.isnan(xpl_overall): md_lines.append(f"- Explosive rate: {xpl_overall:.0%}")
 md_lines.append("")
 md_lines.append("## Key Tendencies")
 md_lines.extend([
@@ -463,8 +738,7 @@ md_lines.extend([
 ])
 md_lines.append("")
 md_lines.append("## Game-Plan Suggestions (Universal)")
-for s in suggestions:
-    md_lines.append(f"- {s}")
+for s in suggestions: md_lines.append(f"- {s}")
 md_lines.append("")
 md_lines.append(
     "> Map to call sheet: Pressure answers (screens/quick/hot), Man (mesh/rubs/option/BS fade), Cover 3 (Flood/Curl-Flat/Dagger), Quarters (Posts/Benders/Scissors)."
@@ -492,4 +766,4 @@ st.download_button(
     mime="application/zip",
 )
 
-st.success("Done. Universal terminology applied throughout. Adjust your call sheet buckets by situation and personnel.")
+st.success("Done. Use diagnostics above to fill any missing columns, then review tendencies and game-plan notes. Use the Playbook Library + Google Sheets to persist your calls.")
