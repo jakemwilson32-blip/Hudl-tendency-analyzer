@@ -196,7 +196,8 @@ def compute_coverage(df: pd.DataFrame, dims):
     g = df.copy()
     g["COVERAGE_N"] = g["COVERAGE"].fillna("Unknown").astype(str).str.upper()
     tbl = g.groupby(dims + ["COVERAGE_N"]).size().reset_index(name="plays")
-    tbl["%"] = tbl.groupby(dims)["plays"].apply(lambda x: (100 * x / x.sum()).round(1))
+  den = tbl.groupby(dims)["plays"].transform("sum").replace(0, np.nan)
+tbl["%"] = ((100 * tbl["plays"] / den).round(1)).fillna(0)
     return tbl.sort_values(dims + ["plays"], ascending=[True]*len(dims) + [False])
 
 
