@@ -125,11 +125,10 @@ def normalize_play_type(row: pd.Series) -> str:
 
 
 def left_mid_right(s) -> str:
-    # Robustly handle NaN, numbers, and strings for play direction
+    # Handle NaN, numerics, and strings safely
     if pd.isna(s):
         return "Unknown"
     try:
-        # If someone encoded direction numerically: -1=Left, 0=Middle, 1=Right
         si = int(float(s))
         return { -1: "Left", 0: "Middle", 1: "Right" }.get(si, "Unknown")
     except Exception:
@@ -137,12 +136,11 @@ def left_mid_right(s) -> str:
     s = str(s).strip().lower()
     if not s:
         return "Unknown"
-    # Common shorthands
-    if s in {"l","lt","left","boundary left","field left"} or s.startswith("l"):
+    if s in {"l","lt","left"} or s.startswith("l"):
         return "Left"
-    if s in {"r","rt","right","boundary right","field right"} or s.startswith("r"):
+    if s in {"r","rt","right"} or s.startswith("r"):
         return "Right"
-    if s in {"m","mid","middle","inside","in","center","ctr"} or s.startswith("m") or s.startswith("i"):
+    if s in {"m","mid","middle","inside","in","center","ctr"} or s.startswith(("m","i")):
         return "Middle"
     return "Unknown"
 
@@ -176,8 +174,12 @@ def field_zone(yard_ln: float) -> str:
 
 
 def tendency_table(df: pd.DataFrame, dims, outcome_col="PLAY_TYPE_NORM"):
-    g = df.groupby(dims + [outcome_col]).size().reset_index(name="plays")
-    g["%"] = g.groupby(dims)["plays"].apply(lambda x: (100 * x / x.sum()).round(1))
+    # Robust % calc using transform so index aligns with g
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=dims + [outcome_col, "plays", "%"])
+    g = df.groupby(dims + [outcome_col], dropna=False).size().reset_index(name="plays")
+    denom = g.groupby(dims)["plays"].transform("sum").replace(0, np.nan)
+    g["%"] = ((100 * g["plays"] / denom).round(1)).fillna(0)
     return g.sort_values(dims + ["plays"], ascending=[True]*len(dims) + [False])
 
 
