@@ -978,7 +978,7 @@ try:
                  </div>
                 ''')
             parts.append('</div>')
-       html_str = "\n".join(parts)
+        html_str = "\n".join(parts)
 
         st.components.v1.html(html_str, height=800, scrolling=True)
         st.download_button("⬇️ Download OC_OnePager.html", data=html_str.encode('utf-8'), file_name="OC_OnePager.html", mime="text/html")
