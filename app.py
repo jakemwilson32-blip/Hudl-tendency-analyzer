@@ -348,7 +348,9 @@ cov_3rd = compute_coverage(raw[raw["DN"]==3], ["DIST_BUCKET"])       # 3rd down 
 motion_tbl = raw.copy()
 motion_tbl["MOTION_N"] = np.where(motion_tbl["MOTION"].astype(str).str.strip().eq(""), "None", "Motion")
 motion_tbl = motion_tbl.groupby(["MOTION_N","PLAY_TYPE_NORM"]).size().reset_index(name="plays")
-motion_tbl["%"] = motion_tbl.groupby(["MOTION_N"])["plays"].apply(lambda x: (100 * x / x.sum()).round(1))
+den = motion_tbl.groupby(["MOTION_N"])["plays"].transform("sum").replace(0, np.nan)
+motion_tbl["%"] = ((100 * motion_tbl["plays"] / den).round(1)).fillna(0)
+
 
 # -----------------------
 # Visuals & Tables
