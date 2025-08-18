@@ -882,5 +882,80 @@ else:
         st.dataframe(call_sheet)
         st.download_button("⬇️ Download Call_Sheet_PlaybookOnly.csv", data=call_sheet.to_csv(index=False).encode("utf-8"), file_name="Call_Sheet_PlaybookOnly.csv", mime="text/csv")
     else:
-        st.info("Could not find plays
+        st.info("Could not find plays matching the standard buckets. Add situation tags like '1st&10', '3rd&7-10', or concept tags (Snag, Flood, Mesh, Smash, Dagger, Screen, IZ/OZ/Power/Counter).")
+
+# -----------------------
+# Exports (CSVs + Markdown)
+# -----------------------
 outputs = {
+    "overall_tendencies.csv": overall,
+    "tendency_by_down.csv": by_down,
+    "tendency_by_down_distance.csv": by_dist,
+    "tendency_by_formation.csv": by_form,
+    "tendency_by_direction.csv": by_dir,
+    "tendency_by_field_zone.csv": by_fz,
+    "tendency_red_zone_by_down.csv": by_rz,
+    "blitz_rate_third_down.csv": blitz_3rd,
+    "coverage_third_down.csv": cov_3rd,
+    "motion_usage.csv": motion_tbl,
+}
+
+# Build Markdown report
+md_lines = []
+md_lines.append(f"# Tendency & Game Plan Report — {custom_team} (Universal)")
+md_lines.append("")
+md_lines.append("## Overview")
+if len(overall):
+    for _, r in overall.sort_values("plays", ascending=False).iterrows():
+        md_lines.append(f"- {r['PLAY_TYPE_NORM']}: {int(r['plays'])} plays ({r['%']}%)")
+if not np.isnan(sr_overall): md_lines.append(f"- Success rate: {sr_overall:.0%}")
+if not np.isnan(xpl_overall): md_lines.append(f"- Explosive rate: {xpl_overall:.0%}")
+md_lines.append("")
+md_lines.append("## Key Tendencies")
+md_lines.extend([
+    "- By Down: see tendency_by_down.csv",
+    "- By Down & Distance: see tendency_by_down_distance.csv",
+    "- By Formation/Strength/Backfield: see tendency_by_formation.csv",
+    "- Direction (Left/Middle/Right): see tendency_by_direction.csv",
+    "- Field Zones & Red Zone: see tendency_by_field_zone.csv and tendency_red_zone_by_down.csv",
+    "- Blitz & Coverage on 3rd Down: see blitz_rate_third_down.csv and coverage_third_down.csv",
+    "- Motion Usage: see motion_usage.csv",
+])
+md_lines.append("")
+md_lines.append("## Game-Plan Suggestions (Universal)")
+for s in suggestions: md_lines.append(f"- {s}")
+md_lines.append("")
+md_lines.append(
+    "> Map to call sheet: Pressure answers (screens/quick/hot), Man (mesh/rubs/option/BS fade), Cover 3 (Flood/Curl-Flat/Dagger), Quarters (Posts/Benders/Scissors)."
+)
+md_text = "
+".join(md_lines)
+
+st.download_button(
+    label="⬇️ Download GamePlan_Suggestions.md",
+    data=md_text.encode("utf-8"),
+    file_name="GamePlan_Suggestions.md",
+    mime="text/markdown",
+)
+
+# Zip of CSV outputs
+zip_buf = io.BytesIO()
+with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+    for fname, df in outputs.items():
+        zf.writestr(fname, df.to_csv(index=False))
+    # Include playbook-only call sheet if it exists
+    try:
+        if 'call_sheet' in locals():
+            zf.writestr("call_sheet_playbook_only.csv", call_sheet.to_csv(index=False))
+    except Exception:
+        pass
+    zf.writestr("GamePlan_Suggestions.md", md_text)
+
+st.download_button(
+    label="⬇️ Download All Outputs (.zip)",
+    data=zip_buf.getvalue(),
+    file_name="hudl_tendencies_outputs.zip",
+    mime="application/zip",
+)
+
+st.success("Done. Use diagnostics above to fill any missing columns, then review tendencies and game-plan notes. Use the Playbook Library + Google Sheets to persist your calls.")
