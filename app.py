@@ -890,6 +890,7 @@ else:
 try:
     if 'call_sheet' in locals() and isinstance(call_sheet, pd.DataFrame) and not call_sheet.empty:
         st.subheader("Printable One-Pager")
+        st.caption("Thumbnails match by FORMATION + PLAY NAME (motions ignored). Provide FILE_NAME to override.")
         include_imgs = st.checkbox("Include play art (from uploaded images)", True)
         thumb_px = st.slider("Thumbnail size (px)", 60, 140, 90, 10)
         images_map = st.session_state.PLAYBOOK.get('images', {})
@@ -908,44 +909,79 @@ try:
             t = t.lower().replace('&', 'and')
             return re.sub(r'[^a-z0-9]+', '', t)
 
-        def _find_best_image_for(row) -> str | None:
-            # 1) honor explicit FILE_NAME if present & found
+                def _find_best_image_for(row) -> str | None:
+            # Prefer matching by FORMATION + PLAY NAME, ignore motions in the call text.
+            # 1) Honor explicit FILE_NAME if present & found
             fn = str(row.get('FILE_NAME') or '').strip()
             if fn and fn in images_map:
                 return fn
 
-            # 2) fuzzy match on filename vs CALL / PLAY_NAME text
-            keys = []
-            call = row.get('CALL', '')
-            pname = row.get('PLAY_NAME', '')
-            if call: keys.append(call)
-            if pname: keys.append(pname)
-            # if "Form. Rest" format, also try just the rest
-            for k in list(keys):
-                if '. ' in k:
-                    keys.append(k.split('. ', 1)[1])
+            # helper: strip motion tokens like "Y-OVER", "x-yo-yo", etc., without regex to keep things portable
+            def _strip_motions(txt: str) -> str:
+                if not txt:
+                    return ''
+                motion_types = [t.strip().upper().replace('-', '') for t in st.session_state.get('MOTION_TYPES', ["OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YO-YO","TIP"])]
+                letters = set(list('XYHZF'))
+                out = []
+                for tok in str(txt).split():
+                    if '-' in tok:
+                        a, b = tok.split('-', 1)
+                        if len(a) == 1 and a.upper() in letters:
+                            if b.replace('-', '').upper() in motion_types:
+                                continue  # drop this motion token
+                    out.append(tok)
+                return ' '.join(out).strip()
 
-            keynorms = [_canon(k) for k in keys if k]
-            if not keynorms:
-                return None
+            def _after_dot(s: str) -> str:
+                s = str(s or '')
+                return s.split('. ', 1)[1] if '. ' in s else s
 
-            # build normalized map of uploaded filenames (stem only)
+            call = row.get('CALL', '') or ''
+            pname = row.get('PLAY_NAME', '') or ''
+            formation = str(row.get('FORMATION','') or '')
+            strength = str(row.get('STRENGTH','') or '')
+
+            base_from_call = _strip_motions(_after_dot(call))
+            base_from_pname = _after_dot(pname)
+
+            # Build candidate keys emphasizing FORMATION + PLAY NAME
+            candidate_texts = []
+            for base in [base_from_call, base_from_pname]:
+                if base:
+                    candidate_texts.append(f"{formation} {base}")
+                    if strength:
+                        candidate_texts.append(f"{formation} {strength} {base}")
+                    candidate_texts.append(base)  # fallback to play name alone
+
+            if pname:
+                candidate_texts.append(pname.replace('. ', ' '))  # e.g., "Deck Left BANJO"
+
+            keynorms = [_canon(t) for t in candidate_texts if t]
+
             from difflib import SequenceMatcher
             filenorm = {fnm: _canon(Path(fnm).stem) for fnm in images_map.keys()}
 
             best_name, best_score = None, 0.0
+            play_piece = _canon(base_from_call or base_from_pname)
+            form_piece = _canon(formation + (' ' + strength if strength else ''))
+
             for fname, fstem in filenorm.items():
                 for kn in keynorms:
                     if not kn:
                         continue
                     score = SequenceMatcher(None, fstem, kn).ratio()
-                    # small boost if substring match either way
+                    # Boosts focused on formation+play match
+                    if play_piece and play_piece in fstem:
+                        score += 0.25
+                    if form_piece and form_piece in fstem:
+                        score += 0.20
+                    if play_piece and form_piece and (play_piece in fstem and form_piece in fstem):
+                        score += 0.20
                     if kn in fstem or fstem in kn:
-                        score += 0.3
+                        score += 0.10
                     if score > best_score:
                         best_score, best_name = score, fname
 
-            # require a reasonable match
             if best_name and best_score >= 0.55:
                 return best_name
             return None
