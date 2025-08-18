@@ -384,7 +384,19 @@ if 'MOTION_LETTERS' not in st.session_state:
 if 'MOTION_PCT' not in st.session_state:
     st.session_state.MOTION_PCT = 100  # % of calls that include motion
 if 'INCLUDE_MOTION' not in st.session_state:
-    st.session_state.INCLUDE_MOTION = True
+    st.session_state.INCLUDE_MOTION = True# --- Formation & screen defaults ---
+if 'CONCEPT_FORMATION_RULES' not in st.session_state:
+    # Your note: TRAIN only out of TRIPS (not BUNCH)
+    st.session_state.CONCEPT_FORMATION_RULES = {
+        'TRAIN': ['TRIPS'],
+        # Add more later if you want, e.g.:
+        # 'VIPER': ['TRIPS','TWIG']
+    }
+if 'SCREEN_RECIPIENT_ORDER' not in st.session_state:
+    st.session_state.SCREEN_RECIPIENT_ORDER = ['Y','Z','H','X','F']
+if 'TIE_MOTION_TO_RECIPIENT' not in st.session_state:
+    st.session_state.TIE_MOTION_TO_RECIPIENT = True
+
 
 col_pb1, col_pb2 = st.columns([2,1])
 with col_pb1:
@@ -502,7 +514,41 @@ with st.expander("Motion Settings (carry through each game)"):
         step=5
     )
     st.caption("F = RB. Motions will be inserted as <Letter>-<Type> (e.g., H-FLY, X-OVER) before the play name in the final CALL column.")
+# -----------------------
+# Call Sheet Rules (formations & screens)
+# -----------------------
+with st.expander("Call Sheet Rules (formations & screens)"):
+    # Formation list from your library (fallback to a common list if empty)
+    lib_for_opts = pd.DataFrame(st.session_state.PLAYBOOK.get('plays', []))
+    form_opts = sorted(set(str(x).upper() for x in lib_for_opts.get('FORMATION', pd.Series(dtype=str)).dropna().unique())) or ["DICE","DECK","DOUBLES","DOS","TRIPS","TWIG","TREY","TRIO","BUNCH","BUNDLE","GANG","GLOCK","GAUGE","EMPTY","EGO"]
 
+    rules = st.session_state.get('CONCEPT_FORMATION_RULES', {})
+
+    def _rule_ui(concept_key: str, label: str):
+        current = [s.upper() for s in rules.get(concept_key, [])]
+        picked = st.multiselect(f"Allowed formations for {label}", options=form_opts, default=current, key=f"rule_{concept_key}")
+        rules[concept_key] = picked
+
+    _rule_ui('TRAIN','TRAIN (tunnel screen)')
+    _rule_ui('VIPER','VIPER (swing screen)')
+    _rule_ui('UNICORN','UNICORN (throwback)')
+    _rule_ui('UTAH','UTAH (shovel/drag)')
+
+    st.session_state.CONCEPT_FORMATION_RULES = rules
+
+    st.markdown("**Screen recipient letters (order of preference)**")
+    order_str = st.text_input("Letters in order (comma-separated)", value=",".join(st.session_state.get('SCREEN_RECIPIENT_ORDER', ['Y','Z','H','X','F'])))
+    try:
+        parsed = [s.strip().upper() for s in order_str.split(',') if s.strip()]
+        if parsed:
+            st.session_state.SCREEN_RECIPIENT_ORDER = parsed
+    except Exception:
+        pass
+
+    st.session_state.TIE_MOTION_TO_RECIPIENT = st.checkbox(
+        "Tie motion letter to the screen recipient (e.g., y-yo-yo y-train)",
+        value=st.session_state.get('TIE_MOTION_TO_RECIPIENT', True)
+    )
 # -----------------------
 # File upload (optional)
 # -----------------------
@@ -742,11 +788,33 @@ else:
         "3rd & long (7-10)": ["3rd&7-10","dagger","flood","smash","screen","wheel"],
         "Red Zone": ["rz","money","atm","smash","snag","fade","rub","pick"],
         "2-minute": ["2-minute","hurry","sideline","dagger","curl-flat","out","arrow"],
-    }
+    }# Apply formation constraints per concept before selection
+def _detect_concept(row: pd.Series) -> str | None:
+    txt = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).upper()
+    for key in ['TRAIN','VIPER','UNICORN','UTAH']:
+        if key in txt:
+            return key
+    return None
+
+rules = st.session_state.get('CONCEPT_FORMATION_RULES', {})
+lib2 = lib.copy()
+if not lib2.empty:
+    lib2['__CONCEPT__'] = lib2.apply(_detect_concept, axis=1)
+    mask_keep = []
+    for _, rr in lib2.iterrows():
+        ck = rr['__CONCEPT__']
+        if ck and rules.get(ck):
+            allowed = {s.upper() for s in rules[ck]}
+            form = str(rr.get('FORMATION','')).upper()
+            mask_keep.append(form in allowed)
+        else:
+            mask_keep.append(True)
+    lib2 = lib2[pd.Series(mask_keep, index=lib2.index)].drop(columns=['__CONCEPT__'])
+
 
     call_rows = []
     for bucket, keys in buckets.items():
-        picked = _pick_varied(lib, [k.lower() for k in keys], limit=6)
+       picked = _pick_varied(lib2, [k.lower() for k in keys], limit=6)
         if not picked.empty:
             picked = picked[["PLAY_NAME","PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS","COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]]
             picked.insert(0, "Bucket", bucket)
@@ -781,11 +849,46 @@ else:
                 call_sheet.at[idx, "MOTION_TYPE"] = T
                 call_sheet.at[idx, "CALL"] = new_call
 
-        # Show CALL first for readability if present
-        cols = ["Bucket","CALL","PLAY_NAME","MOTION_LETTER","MOTION_TYPE",
-                "PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS",
-                "COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]
-        call_sheet = call_sheet[[c for c in cols if c in call_sheet.columns]]
+# --- Screen recipient labeling & call rewrite for screens ---
+def _screen_concept(row: pd.Series) -> str | None:
+    txt = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).upper()
+    for key in ['TRAIN','VIPER','UNICORN','UTAH']:
+        if key in txt:
+            return key
+    if 'SCREEN' in txt:
+        return 'SCREEN'
+    return None
+
+order = st.session_state.get('SCREEN_RECIPIENT_ORDER', ['Y','Z','H','X','F'])
+tie_motion = st.session_state.get('TIE_MOTION_TO_RECIPIENT', True)
+
+screen_idx = [i for i in call_sheet.index if _screen_concept(call_sheet.loc[i])]
+for j, idx in enumerate(screen_idx):
+    recip = order[j % len(order)]
+    concept = _screen_concept(call_sheet.loc[idx]) or 'SCREEN'
+    call_sheet.at[idx, 'RECIPIENT_LETTER'] = recip
+
+    # tie motion letter to recipient, if requested
+    if tie_motion:
+        call_sheet.at[idx, 'MOTION_LETTER'] = recip
+
+    # Rebuild CALL for screen rows: "<Formation> <Strength>. <letter-motion> <letter-concept>"
+    form = str(call_sheet.at[idx, 'FORMATION'] if 'FORMATION' in call_sheet.columns else '').strip()
+    strength = str(call_sheet.at[idx, 'STRENGTH'] if 'STRENGTH' in call_sheet.columns else '').strip()
+    prefix = (form + (' ' + strength if strength else '')).strip()
+
+    m_letter = str(call_sheet.at[idx, 'MOTION_LETTER'] or '')
+    m_type = str(call_sheet.at[idx, 'MOTION_TYPE'] or '')
+    motion_piece = (f"{m_letter.lower()}-{m_type} " if m_letter and m_type else '')
+    screen_piece = f"{recip.lower()}-{concept.lower()}"
+
+    call_sheet.at[idx, 'CALL'] = (f"{prefix}. " if prefix else '') + motion_piece + screen_piece
+
+# Show CALL first for readability if present
+cols = ["Bucket","CALL","PLAY_NAME","MOTION_LETTER","MOTION_TYPE","RECIPIENT_LETTER",
+        "PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS",
+        "COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]
+call_sheet = call_sheet[[c for c in cols if c in call_sheet.columns]]
 
         st.dataframe(call_sheet)
         st.download_button("⬇️ Download Call_Sheet_PlaybookOnly.csv", data=call_sheet.to_csv(index=False).encode("utf-8"), file_name="Call_Sheet_PlaybookOnly.csv", mime="text/csv")
