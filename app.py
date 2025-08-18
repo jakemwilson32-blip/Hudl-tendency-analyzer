@@ -124,13 +124,25 @@ def normalize_play_type(row: pd.Series) -> str:
     return "Unknown"
 
 
-def left_mid_right(s: str) -> str:
-    s = (s or "").strip().lower()
-    if s.startswith("l"):
+def left_mid_right(s) -> str:
+    # Robustly handle NaN, numbers, and strings for play direction
+    if pd.isna(s):
+        return "Unknown"
+    try:
+        # If someone encoded direction numerically: -1=Left, 0=Middle, 1=Right
+        si = int(float(s))
+        return { -1: "Left", 0: "Middle", 1: "Right" }.get(si, "Unknown")
+    except Exception:
+        pass
+    s = str(s).strip().lower()
+    if not s:
+        return "Unknown"
+    # Common shorthands
+    if s in {"l","lt","left","boundary left","field left"} or s.startswith("l"):
         return "Left"
-    if s.startswith("r"):
+    if s in {"r","rt","right","boundary right","field right"} or s.startswith("r"):
         return "Right"
-    if s.startswith("m") or s.startswith("i"):
+    if s in {"m","mid","middle","inside","in","center","ctr"} or s.startswith("m") or s.startswith("i"):
         return "Middle"
     return "Unknown"
 
