@@ -459,19 +459,24 @@ with col_pb2:
             st.success(f"Added play: {qa_name}")
 
 # -----------------------
-# File upload
+# File upload (optional)
 # -----------------------
-file = st.file_uploader("Upload Hudl-style CSV or Excel", type=["csv","xls","xlsx"]) 
+file = st.file_uploader("Upload Hudl-style CSV or Excel (optional)", type=["csv","xlsx"]) 
 
+# If no file, proceed with an empty DataFrame so the app can still build a plan from your Playbook Library
 if not file:
-    st.info("Upload a CSV/Excel with the headers from the template to begin. You can still set up your Playbook Library above.")
-    st.stop()
-
-# Read & standardize headers
-if file.name.lower().endswith((".xls",".xlsx")):
-    raw = pd.read_excel(file)
+    st.info("No opponent data uploaded — that's okay! We'll still build a game plan from your Playbook Library below.")
+    raw = pd.DataFrame(columns=PRIMARY_COLS)
 else:
-    raw = pd.read_csv(file)
+    # Try to read the file; prefer CSV; Excel requires openpyxl on the server
+    try:
+        if file.name.lower().endswith(".xlsx"):
+            raw = pd.read_excel(file, engine="openpyxl")
+        else:
+            raw = pd.read_csv(file)
+    except ImportError:
+        st.warning("Excel support requires 'openpyxl' on the server. Either upload a CSV or add 'openpyxl' to requirements.txt. Proceeding without opponent data.")
+        raw = pd.DataFrame(columns=PRIMARY_COLS)
 
 # Rename aliases to primary
 raw = raw.rename(columns={k:v for k,v in ALIAS_MAP.items() if k in raw.columns})
@@ -656,6 +661,59 @@ st.markdown("**Screen Menu:** " + ", ".join(OFF_SCREEN_FAMILY))
 st.markdown("**Run Game:** " + ", ".join(RUN_GAME))
 
 # -----------------------
+# Playbook-Only Planner (No Opponent Data Required)
+# -----------------------
+st.subheader("Playbook-Only Planner (No Opponent Data)")
+lib = pd.DataFrame(st.session_state.PLAYBOOK.get('plays', []))
+if lib.empty:
+    st.info("Add plays to your Playbook Library above to generate a call sheet without opponent data.")
+else:
+    def _text_contains(text: str, keywords: list[str]) -> bool:
+        hay = str(text or '').lower()
+        return any(k in hay for k in keywords)
+
+    def _pick_varied(df: pd.DataFrame, keywords: list[str], limit: int = 6) -> pd.DataFrame:
+        mask = df.apply(lambda r: _text_contains((r.get('CONCEPT_TAGS','') + ' ' + r.get('SITUATION_TAGS','')), keywords), axis=1)
+        cand = df[mask].copy()
+        if cand.empty:
+            cand = df.copy()
+        picked = []
+        used_names, used_forms = set(), set()
+        for _, r in cand.iterrows():
+            name = r.get('PLAY_NAME'); form = r.get('FORMATION')
+            if name in used_names or form in used_forms:
+                continue
+            picked.append(r)
+            used_names.add(name); used_forms.add(form)
+            if len(picked) >= limit:
+                break
+        return pd.DataFrame(picked)
+
+    buckets = {
+        "1st & 10": ["1st&10","quick","inside zone","iz","outside zone","oz","power","counter","rpo","play-action","boot"],
+        "2nd & medium (4-6)": ["2nd&medium","quick","screen","draw","counter","boot","pa"],
+        "3rd & short (1-3)": ["3rd&1-3","hitch","slant","snag","mesh","iso","power","qb sneak"],
+        "3rd & medium (4-6)": ["3rd&4-6","snag","smash","flood","curl-flat","mesh","screen"],
+        "3rd & long (7-10)": ["3rd&7-10","dagger","flood","smash","screen","wheel"],
+        "Red Zone": ["rz","money","atm","smash","snag","fade","rub","pick"],
+        "2-minute": ["2-minute","hurry","sideline","dagger","curl-flat","out","arrow"],
+    }
+
+    call_rows = []
+    for bucket, keys in buckets.items():
+        picked = _pick_varied(lib, [k.lower() for k in keys], limit=6)
+        if not picked.empty:
+            picked = picked[["PLAY_NAME","PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS","COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]]
+            picked.insert(0, "Bucket", bucket)
+            call_rows.append(picked)
+    if call_rows:
+        call_sheet = pd.concat(call_rows, ignore_index=True)
+        st.dataframe(call_sheet)
+        st.download_button("⬇️ Download Call_Sheet_PlaybookOnly.csv", data=call_sheet.to_csv(index=False).encode("utf-8"), file_name="Call_Sheet_PlaybookOnly.csv", mime="text/csv")
+    else:
+        st.info("Could not find plays matching the standard buckets. Add situation tags like '1st&10', '3rd&7-10', or concept tags (Snag, Flood, Mesh, Smash, Dagger, Screen, IZ/OZ/Power/Counter).")
+
+# -----------------------
 # Exports (CSVs + Markdown)
 # -----------------------
 outputs = {
@@ -712,6 +770,12 @@ zip_buf = io.BytesIO()
 with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
     for fname, df in outputs.items():
         zf.writestr(fname, df.to_csv(index=False))
+    # Include playbook-only call sheet if it exists
+    try:
+        if 'call_sheet' in locals():
+            zf.writestr("call_sheet_playbook_only.csv", call_sheet.to_csv(index=False))
+    except Exception:
+        pass
     zf.writestr("GamePlan_Suggestions.md", md_text)
 
 st.download_button(
