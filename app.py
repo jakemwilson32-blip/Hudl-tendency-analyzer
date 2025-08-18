@@ -902,15 +902,64 @@ try:
                 return 'image/webp'
             return 'image/png'
 
-        def _img_tag(fn, thumb):
+        def _canon(s: str) -> str:
+            import re, unicodedata
+            t = unicodedata.normalize('NFKD', str(s or '')).encode('ascii','ignore').decode('ascii')
+            t = t.lower().replace('&', 'and')
+            return re.sub(r'[^a-z0-9]+', '', t)
+
+        def _find_best_image_for(row) -> str | None:
+            # 1) honor explicit FILE_NAME if present & found
+            fn = str(row.get('FILE_NAME') or '').strip()
+            if fn and fn in images_map:
+                return fn
+
+            # 2) fuzzy match on filename vs CALL / PLAY_NAME text
+            keys = []
+            call = row.get('CALL', '')
+            pname = row.get('PLAY_NAME', '')
+            if call: keys.append(call)
+            if pname: keys.append(pname)
+            # if "Form. Rest" format, also try just the rest
+            for k in list(keys):
+                if '. ' in k:
+                    keys.append(k.split('. ', 1)[1])
+
+            keynorms = [_canon(k) for k in keys if k]
+            if not keynorms:
+                return None
+
+            # build normalized map of uploaded filenames (stem only)
+            from difflib import SequenceMatcher
+            filenorm = {fnm: _canon(Path(fnm).stem) for fnm in images_map.keys()}
+
+            best_name, best_score = None, 0.0
+            for fname, fstem in filenorm.items():
+                for kn in keynorms:
+                    if not kn:
+                        continue
+                    score = SequenceMatcher(None, fstem, kn).ratio()
+                    # small boost if substring match either way
+                    if kn in fstem or fstem in kn:
+                        score += 0.3
+                    if score > best_score:
+                        best_score, best_name = score, fname
+
+            # require a reasonable match
+            if best_name and best_score >= 0.55:
+                return best_name
+            return None
+
+        def _img_tag_for_row(row):
             if not include_imgs:
                 return ''
-            if not fn:
+            fname = _find_best_image_for(row)
+            if not fname:
                 return ''
-            b = images_map.get(str(fn))
+            b = images_map.get(fname)
             if not b:
                 return ''
-            mime = _guess_mime(fn)
+            mime = _guess_mime(fname)
             b64 = base64.b64encode(b).decode('utf-8')
             return f'<img class="thumb" src="data:{mime};base64,{b64}" />'
 
@@ -950,8 +999,7 @@ try:
                 cov = _esc(r.get('COVERAGE_TAGS','')); press = _esc(r.get('PRESSURE_TAGS',''))
                 situ = _esc(r.get('SITUATION_TAGS',''))
                 concept = _esc(r.get('CONCEPT_TAGS',''))
-                fn = r.get('FILE_NAME','')
-                img = _img_tag(fn, thumb_px)
+                img = _img_tag_for_row(r)
 
                 motion_txt = ''
                 if (mlet or mtype):
