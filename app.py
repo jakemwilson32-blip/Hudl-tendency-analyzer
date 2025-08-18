@@ -885,6 +885,109 @@ else:
         st.info("Could not find plays matching the standard buckets. Add situation tags like '1st&10', '3rd&7-10', or concept tags (Snag, Flood, Mesh, Smash, Dagger, Screen, IZ/OZ/Power/Counter).")
 
 # -----------------------
+# Printable One-Pager (Call Sheet with Thumbnails)
+# -----------------------
+try:
+    if 'call_sheet' in locals() and isinstance(call_sheet, pd.DataFrame) and not call_sheet.empty:
+        st.subheader("Printable One-Pager")
+        include_imgs = st.checkbox("Include play art (from uploaded images)", True)
+        thumb_px = st.slider("Thumbnail size (px)", 60, 140, 90, 10)
+        images_map = st.session_state.PLAYBOOK.get('images', {})
+
+        def _guess_mime(name):
+            n = str(name or '').lower()
+            if n.endswith('.jpg') or n.endswith('.jpeg'):
+                return 'image/jpeg'
+            if n.endswith('.webp'):
+                return 'image/webp'
+            return 'image/png'
+
+        def _img_tag(fn, thumb):
+            if not include_imgs:
+                return ''
+            if not fn:
+                return ''
+            b = images_map.get(str(fn))
+            if not b:
+                return ''
+            mime = _guess_mime(fn)
+            b64 = base64.b64encode(b).decode('utf-8')
+            return f'<img class="thumb" src="data:{mime};base64,{b64}" />'
+
+        def _esc(s):
+            try:
+                import html as _html
+                return _html.escape('' if s is None else str(s))
+            except Exception:
+                return str(s)
+
+        # Build HTML
+        parts = []
+        parts.append(f'''
+        <style>
+        @media print {{
+          @page {{ size: Letter landscape; margin: 0.35in; }}
+          body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+        }}
+        body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
+        .bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
+        .bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
+        .row {{ display:flex; align-items:center; gap:8px; padding:6px 10px; border-top:1px solid #eee; }}
+        .thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; }}
+        .main {{ font-weight:700; font-size:14px; }}
+        .meta {{ font-size:12px; color:#334155; }}
+        </style>
+        ''')
+
+        for bucket, dfb in call_sheet.groupby('Bucket', sort=False):
+            parts.append(f'<div class="bucket"><div class="bktitle">{_esc(bucket)}</div>')
+            for _, r in dfb.iterrows():
+                call = _esc(r.get('CALL',''))
+                form = _esc(r.get('FORMATION','')); strn = _esc(r.get('STRENGTH',''))
+                pers = _esc(r.get('PERSONNEL',''))
+                mlet = _esc(r.get('MOTION_LETTER','')); mtype = _esc(r.get('MOTION_TYPE',''))
+                recip = _esc(r.get('RECIPIENT_LETTER',''))
+                cov = _esc(r.get('COVERAGE_TAGS','')); press = _esc(r.get('PRESSURE_TAGS',''))
+                situ = _esc(r.get('SITUATION_TAGS',''))
+                concept = _esc(r.get('CONCEPT_TAGS',''))
+                fn = r.get('FILE_NAME','')
+                img = _img_tag(fn, thumb_px)
+
+                motion_txt = ''
+                if (mlet or mtype):
+                    motion_txt = 'Motion ' + '-'.join([s for s in [mlet, mtype] if s])
+
+                meta_bits = [x for x in [
+                    f"{form} {strn}".strip(),
+                    f"Pers {pers}" if pers else '',
+                    motion_txt,
+                    f"Recipient {recip}" if recip else '',
+                    situ
+                ] if x]
+                meta_line = ' | '.join(meta_bits)
+                tags_line = ' • '.join([x for x in [concept, cov, press] if x])
+
+                parts.append(f'''
+                 <div class="row">
+                   {img if img else ''}
+                   <div>
+                     <div class="main">{call}</div>
+                     <div class="meta">{_esc(meta_line)}</div>
+                     {f'<div class="meta">{_esc(tags_line)}</div>' if tags_line else ''}
+                   </div>
+                 </div>
+                ''')
+            parts.append('</div>')
+        html_str = "
+".join(parts)
+
+        st.components.v1.html(html_str, height=800, scrolling=True)
+        st.download_button("⬇️ Download OC_OnePager.html", data=html_str.encode('utf-8'), file_name="OC_OnePager.html", mime="text/html")
+        onepager_html = html_str
+except Exception as _e:
+    st.warning(f"One-Pager build skipped: {_e}")
+
+# -----------------------
 # Exports (CSVs + Markdown)
 # -----------------------
 outputs = {
@@ -928,7 +1031,8 @@ md_lines.append("")
 md_lines.append(
     "> Map to call sheet: Pressure answers (screens/quick/hot), Man (mesh/rubs/option/BS fade), Cover 3 (Flood/Curl-Flat/Dagger), Quarters (Posts/Benders/Scissors)."
 )
-md_text = "\n".join(md_lines)
+md_text = "
+".join(md_lines)
 
 st.download_button(
     label="⬇️ Download GamePlan_Suggestions.md",
