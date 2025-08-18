@@ -215,7 +215,18 @@ def serialize_playbook(pb: dict) -> dict:
             out['images'][fname] = base64.b64encode(b).decode('utf-8')
         except Exception:
             pass
-    return out
+    return out = {
+    'plays': pb.get('plays', []),
+    'images': {},
+    'sheets_csv_url': st.session_state.get('SHEETS_CSV_URL', ''),
+    'sheets_write_url': st.session_state.get('SHEETS_WRITE_URL', ''),
+    # persist motion settings
+    'motion_types': st.session_state.get('MOTION_TYPES', []),
+    'motion_letters': st.session_state.get('MOTION_LETTERS', []),
+    'motion_pct': st.session_state.get('MOTION_PCT', 100),
+    'include_motion': st.session_state.get('INCLUDE_MOTION', True),
+}
+
 
 
 def deserialize_playbook(pb_json: dict) -> dict:
@@ -228,7 +239,12 @@ def deserialize_playbook(pb_json: dict) -> dict:
     # restore sheet URLs
     st.session_state['SHEETS_CSV_URL'] = pb_json.get('sheets_csv_url', '')
     st.session_state['SHEETS_WRITE_URL'] = pb_json.get('sheets_write_url', '')
-    return pb
+    # restore motion settings
+st.session_state['MOTION_TYPES'] = pb_json.get('motion_types', st.session_state.get('MOTION_TYPES', []))
+st.session_state['MOTION_LETTERS'] = pb_json.get('motion_letters', st.session_state.get('MOTION_LETTERS', []))
+st.session_state['MOTION_PCT'] = pb_json.get('motion_pct', st.session_state.get('MOTION_PCT', 100))
+st.session_state['INCLUDE_MOTION'] = pb_json.get('include_motion', st.session_state.get('INCLUDE_MOTION', True))
+return pb
 
 
 def load_playbook_from_sheets_csv(url: str) -> pd.DataFrame:
@@ -366,6 +382,16 @@ if 'SHEETS_CSV_URL' not in st.session_state:
     st.session_state.SHEETS_CSV_URL = ''
 if 'SHEETS_WRITE_URL' not in st.session_state:
     st.session_state.SHEETS_WRITE_URL = ''
+    # Motion defaults (carry through each game)
+if 'MOTION_TYPES' not in st.session_state:
+    st.session_state.MOTION_TYPES = ["OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YO-YO","TIP"]
+if 'MOTION_LETTERS' not in st.session_state:
+    st.session_state.MOTION_LETTERS = ["X","Y","H","Z","F"]  # F = RB
+if 'MOTION_PCT' not in st.session_state:
+    st.session_state.MOTION_PCT = 100  # % of calls that include motion
+if 'INCLUDE_MOTION' not in st.session_state:
+    st.session_state.INCLUDE_MOTION = True
+
 
 col_pb1, col_pb2 = st.columns([2,1])
 with col_pb1:
@@ -457,6 +483,29 @@ with col_pb2:
                 'FILE_NAME': qa_file,
             })
             st.success(f"Added play: {qa_name}")
+            with st.expander("Motion Settings (carry through each game)"):
+    st.session_state.INCLUDE_MOTION = st.checkbox(
+        "Include motion in generated calls",
+        value=st.session_state.get('INCLUDE_MOTION', True)
+    )
+    st.session_state.MOTION_TYPES = st.multiselect(
+        "Motion types",
+        options=["OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YO-YO","TIP"],
+        default=st.session_state.get('MOTION_TYPES', [])
+    )
+    st.session_state.MOTION_LETTERS = st.multiselect(
+        "Motion letters (X,Y,H,Z,F)",
+        options=["X","Y","H","Z","F"],
+        default=st.session_state.get('MOTION_LETTERS', ["X","Y","H","Z","F"])
+    )
+    st.session_state.MOTION_PCT = st.slider(
+        "% of calls that include motion",
+        min_value=0, max_value=100,
+        value=int(st.session_state.get('MOTION_PCT', 100)),
+        step=5
+    )
+    st.caption("F = RB. Motions will be inserted as <Letter>-<Type> (e.g., H-FLY, X-OVER) before the play name in the final CALL column.")
+
 
 # -----------------------
 # File upload (optional)
@@ -707,7 +756,42 @@ else:
             picked.insert(0, "Bucket", bucket)
             call_rows.append(picked)
     if call_rows:
-        call_sheet = pd.concat(call_rows, ignore_index=True)
+       call_sheet = pd.concat(call_rows, ignore_index=True)
+
+# --- Apply motion to calls, if enabled ---
+include = st.session_state.get('INCLUDE_MOTION', True)
+letters = [s.upper() for s in st.session_state.get('MOTION_LETTERS', [])]
+types = [s.upper() for s in st.session_state.get('MOTION_TYPES', [])]
+pct = int(st.session_state.get('MOTION_PCT', 100))
+
+call_sheet = call_sheet.copy()
+call_sheet["MOTION_LETTER"] = ""
+call_sheet["MOTION_TYPE"] = ""
+call_sheet["CALL"] = call_sheet["PLAY_NAME"]
+
+if include and letters and types and pct > 0:
+    n = len(call_sheet)
+    k = max(1, round(n * pct / 100))
+    for i in range(k):
+        idx = i % n
+        L = letters[i % len(letters)]
+        T = types[i % len(types)]
+        base = str(call_sheet.at[idx, "PLAY_NAME"]) or ""
+        if ". " in base:
+            prefix, rest = base.split(". ", 1)
+            new_call = f"{prefix}. {L}-{T} {rest}"
+        else:
+            new_call = f"{L}-{T} {base}"
+        call_sheet.at[idx, "MOTION_LETTER"] = L
+        call_sheet.at[idx, "MOTION_TYPE"] = T
+        call_sheet.at[idx, "CALL"] = new_call
+
+# Show CALL first for readability if present
+cols = ["Bucket","CALL","PLAY_NAME","MOTION_LETTER","MOTION_TYPE",
+        "PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS",
+        "COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]
+call_sheet = call_sheet[[c for c in cols if c in call_sheet.columns]]
+
         st.dataframe(call_sheet)
         st.download_button("⬇️ Download Call_Sheet_PlaybookOnly.csv", data=call_sheet.to_csv(index=False).encode("utf-8"), file_name="Call_Sheet_PlaybookOnly.csv", mime="text/csv")
     else:
