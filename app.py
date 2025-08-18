@@ -928,8 +928,7 @@ md_lines.append("")
 md_lines.append(
     "> Map to call sheet: Pressure answers (screens/quick/hot), Man (mesh/rubs/option/BS fade), Cover 3 (Flood/Curl-Flat/Dagger), Quarters (Posts/Benders/Scissors)."
 )
-md_text = "
-".join(md_lines)
+md_text = "\n".join(md_lines)
 
 st.download_button(
     label="⬇️ Download GamePlan_Suggestions.md",
