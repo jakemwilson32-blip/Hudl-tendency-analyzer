@@ -909,7 +909,7 @@ try:
             t = t.lower().replace('&', 'and')
             return re.sub(r'[^a-z0-9]+', '', t)
 
-            def _find_best_image_for(row) -> str | None:
+        def _find_best_image_for(row) -> str | None:
             # Prefer matching by FORMATION + PLAY NAME, ignore motions in the call text.
             # 1) Honor explicit FILE_NAME if present & found
             fn = str(row.get('FILE_NAME') or '').strip()
