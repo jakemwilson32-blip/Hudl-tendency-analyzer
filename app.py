@@ -224,32 +224,74 @@ def ui_table(title: str, df: pd.DataFrame, chart: bool=False, pivot=None):
         except Exception:
             pass
 
-
 def handle_image_uploads(files):
-    if not files: return ""
-    added = added_from_zip = skipped = 0
+    if not files:
+        return
+    added = added_from_zip = skipped = dup = 0
+    images = st.session_state.PLAYBOOK.setdefault('images', {})
+    exts = {'.png', '.jpg', '.jpeg', '.webp'}
+
     for f in files:
-        name = f.name.lower()
-        if name.endswith('.zip'):
+        fname = f.name
+        if fname.lower().endswith('.zip'):
             try:
-                with zipfile.ZipFile(io.BytesIO(f.read())) as zf:
+                data = f.read()  # read once
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
                     for zi in zf.infolist():
                         if zi.is_dir():
                             continue
+                        # skip macOS resource files and folders
+                        if zi.filename.startswith('__MACOSX/') or Path(zi.filename).name.startswith('._'):
+                            continue
                         ext = Path(zi.filename).suffix.lower()
-                        if ext not in {'.png','.jpg','.jpeg','.webp'}:
-                            skipped += 1;  continue
+                        if ext not in exts:
+                            skipped += 1
+                            continue
                         try:
-                            b = zf.read(zi.filename)
-                            st.session_state.PLAYBOOK['images'][Path(zi.filename).name] = b
-                            added += 1; added_from_zip += 1
+                            buf = zf.read(zi)
                         except Exception:
                             skipped += 1
+                            continue
+
+                        base = Path(zi.filename).name   # drop subfolder
+                        stem = Path(base).stem
+                        key = base
+                        idx = 1
+                        # de-duplicate so we don't overwrite if two files share the same basename
+                        while key in images:
+                            dup += 1
+                            key = f"{stem}_{idx}{ext}"
+                            idx += 1
+
+                        images[key] = buf
+                        added += 1
+                        added_from_zip += 1
             except Exception as e:
-                st.error(f"Couldn't read zip '{f.name}': {e}")
+                st.error(f"Couldn't read zip '{fname}': {e}")
         else:
-            st.session_state.PLAYBOOK['images'][f.name] = f.read();  added += 1
-    msg = f"Stored {added} image(s)" + (f" ({added_from_zip} from zip)" if added_from_zip else '') + (f"; skipped {skipped} non-image file(s)" if skipped else '') + " in your library (in-memory)."
+            try:
+                ext = Path(fname).suffix.lower()
+                if ext in exts:
+                    base = Path(fname).name
+                    stem = Path(base).stem
+                    key = base
+                    idx = 1
+                    while key in images:
+                        dup += 1
+                        key = f"{stem}_{idx}{ext}"
+                        idx += 1
+                    images[key] = f.read()
+                    added += 1
+                else:
+                    skipped += 1
+            except Exception:
+                skipped += 1
+
+    msg = f"Stored {added} image(s)" + (f" ({added_from_zip} from zip)" if added_from_zip else '')
+    if dup:
+        msg += f"; handled {dup} duplicate name(s)"
+    if skipped:
+        msg += f"; skipped {skipped} non-image or invalid file(s)"
     st.success(msg)
 
 # -----------------------
