@@ -386,10 +386,9 @@ with col_pb1:
             st.success(f"Loaded {len(st.session_state.PLAYBOOK.get('plays', []))} plays from your library.")
         except Exception as e:
             st.error(f"Couldn't load playbook.json: {e}")
-
-                st.markdown("**Upload play images** (PNG/JPG or ZIP). Name files to match FILE_NAME in your index, or exactly the PLAY_NAME.")
+    st.markdown("**Upload play images** (PNG/JPG/WEBP or ZIP). Name files to match FILE_NAME in your index, or exactly the PLAY_NAME.")
     uploads = st.file_uploader(
-        "Add play screenshots/diagrams (PNG/JPG or .zip)",
+        "Add play screenshots/diagrams (PNG/JPG/WEBP or .zip)",
         type=["png","jpg","jpeg","webp","zip"],
         accept_multiple_files=True,
         key="pbimgs",
@@ -397,12 +396,10 @@ with col_pb1:
     if uploads:
         added, added_from_zip, skipped = 0, 0, 0
         for f in uploads:
-            fname = f.name
-            lower = fname.lower()
+            lower = f.name.lower()
             if lower.endswith(".zip"):
                 try:
-                    zbytes = f.read()
-                    with zipfile.ZipFile(io.BytesIO(zbytes)) as zf:
+                    with zipfile.ZipFile(io.BytesIO(f.read())) as zf:
                         for zi in zf.infolist():
                             if zi.is_dir():
                                 continue
@@ -412,8 +409,6 @@ with col_pb1:
                                 continue
                             try:
                                 b = zf.read(zi.filename)
-                                # Use basename only (drop folders). If your files are named by PLAY_NAME,
-                                # they will match automatically in the one-pager.
                                 base = Path(zi.filename).name
                                 st.session_state.PLAYBOOK['images'][base] = b
                                 added += 1
@@ -421,18 +416,19 @@ with col_pb1:
                             except Exception:
                                 skipped += 1
                 except Exception as e:
-                    st.error(f"Couldn't read zip '{fname}': {e}")
+                    st.error(f"Couldn't read zip '{f.name}': {e}")
             else:
-                st.session_state.PLAYBOOK['images'][fname] = f.read()
+                st.session_state.PLAYBOOK['images'][f.name] = f.read()
                 added += 1
         msg = f"Stored {added} image(s)"
         if added_from_zip:
             msg += f" ({added_from_zip} from zip)"
         if skipped:
-            msg += f"; skipped {skipped} file(s) that weren't images or couldn't be read"
+            msg += f"; skipped {skipped} non-image file(s)"
         msg += " in your library (in-memory)."
+        st.success(msg)
 
-    st.markdown("**Index your plays with a CSV** (or add rows manually).")
+    st.markdown("**Index your plays with a CSV** (or add rows manually).").")
     st.download_button("Download Play Index CSV Template", data=play_index_template_bytes(), file_name="play_index_template.csv", mime="text/csv")
     play_index_csv = st.file_uploader("Upload play_index.csv (columns: " + ", ".join(PLAYBOOK_COLS) + ")", type=["csv"], key="pbidx")
     if play_index_csv:
