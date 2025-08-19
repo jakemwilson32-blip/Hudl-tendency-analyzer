@@ -889,7 +889,7 @@ def _score_row(r: pd.Series) -> float:
 lib_scored = lib.copy()
 lib_scored["__SCORE__"] = lib_scored.apply(_score_row, axis=1)
 
-        def _pick_top(df: pd.DataFrame, keywords: list[str], limit: int = 6) -> pd.DataFrame:
+def _pick_top(df: pd.DataFrame, keywords: list[str], limit: int = 6) -> pd.DataFrame:
             def _contains(row):
                 hay = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('SITUATION_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).lower()
                 return any(k in hay for k in keywords)
