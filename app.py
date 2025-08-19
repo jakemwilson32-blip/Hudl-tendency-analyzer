@@ -770,151 +770,139 @@ try:
     include_imgs = st.checkbox("Include play art (from uploaded images)", True, key="onepager_imgs")
     thumb_px = st.slider("Thumbnail size (px)", 60, 140, 90, 10, key="onepager_thumb")
 
-    # ---- Robust image lookup helpers (case-insensitive, extension-agnostic) ----
-from pathlib import Path
-import re, unicodedata
+    # --- Robust image lookup helpers (case-insensitive, extension-agnostic) ---
+    import re, unicodedata
 
-def _canon(s: str) -> str:
-    # strip accents, keep only a-z0-9
-    t = unicodedata.normalize('NFKD', str(s or '')).encode('ascii', 'ignore').decode('ascii')
-    return re.sub(r'[^a-z0-9]+', '', t.lower())
+    def _canon(s: str) -> str:
+        t = unicodedata.normalize('NFKD', str(s or '')).encode('ascii', 'ignore').decode('ascii')
+        return re.sub(r'[^a-z0-9]+', '', t.lower())
 
-def _norm_basename(s: str) -> str:
-    # just the file's base name, lowercase
-    return Path(str(s or '').strip()).name.lower()
+    def _norm_basename(s: str) -> str:
+        return Path(str(s or '').strip()).name.lower()
 
-def _stem_canon(s: str) -> str:
-    # canonicalized stem (no extension)
-    return _canon(Path(str(s or '')).stem)
+    def _stem_canon(s: str) -> str:
+        return _canon(Path(str(s or '')).stem)
 
-def _guess_mime(name: str) -> str:
-    n = str(name or '').lower()
-    if n.endswith(('.jpg', '.jpeg')): return 'image/jpeg'
-    if n.endswith('.webp'): return 'image/webp'
-    return 'image/png'
+    def _guess_mime(name: str) -> str:
+        n = str(name or '').lower()
+        if n.endswith(('.jpg', '.jpeg')): return 'image/jpeg'
+        if n.endswith('.webp'): return 'image/webp'
+        return 'image/png'
 
-# Build indexes once per render
-_image_by_basename: dict[str, str] = {}  # "play.png" or "play" -> stored key
-_image_by_stem: dict[str, str] = {}      # canon(stem) -> stored key
+    # Build indexes once per render
+    _image_by_basename: dict[str, str] = {}  # "play.png" or "play" -> stored key
+    _image_by_stem: dict[str, str] = {}      # canon(stem) -> stored key
 
-if images_map:
-    for stored_key in images_map.keys():
-        base = _norm_basename(stored_key)          # e.g. "play.png"
-        stem_lower = Path(base).stem.lower()       # e.g. "play"
-        stem_c = _stem_canon(base)                 # e.g. "play"
-        # map both "play.png" and "play" to stored_key
-        _image_by_basename[base] = stored_key
-        _image_by_basename[stem_lower] = stored_key
-        # canon stem map
-        _image_by_stem[stem_c] = stored_key
+    if images_map:
+        for stored_key in images_map.keys():
+            base = _norm_basename(stored_key)          # e.g. "play.png"
+            stem_lower = Path(base).stem.lower()       # e.g. "play"
+            stem_c = _stem_canon(base)                 # e.g. "play"
+            _image_by_basename[base] = stored_key
+            _image_by_basename[stem_lower] = stored_key
+            _image_by_stem[stem_c] = stored_key
 
-def _find_image(row) -> Optional[str]:
-    # 1) Prefer FILE_NAME if provided (case-insensitive; with/without extension)
-    fn_raw = str(row.get('FILE_NAME') or '').strip()
-    if fn_raw:
-        base = _norm_basename(fn_raw)                # "Play.PNG" -> "play.png"
-        if base in _image_by_basename:
-            return _image_by_basename[base]
-        # try without extension
-        stem_lower = Path(base).stem.lower()
-        if stem_lower in _image_by_basename:
-            return _image_by_basename[stem_lower]
-        # try canonical stem of whatever came in
-        cs = _stem_canon(base)
-        if cs in _image_by_stem:
-            return _image_by_stem[cs]
+    def _find_image(row) -> Optional[str]:
+        # 1) Prefer FILE_NAME (case-insensitive; with/without extension)
+        fn_raw = str(row.get('FILE_NAME') or '').strip()
+        if fn_raw:
+            base = _norm_basename(fn_raw)
+            if base in _image_by_basename:
+                return _image_by_basename[base]
+            stem_lower = Path(base).stem.lower()
+            if stem_lower in _image_by_basename:
+                return _image_by_basename[stem_lower]
+            cs = _stem_canon(base)
+            if cs in _image_by_stem:
+                return _image_by_stem[cs]
+        # 2) Fallback: match by PLAY_NAME
+        name_c = _stem_canon(row.get('PLAY_NAME', ''))
+        if name_c in _image_by_stem:
+            return _image_by_stem[name_c]
+        # 3) Soft contains
+        if name_c:
+            for s, stored_key in _image_by_stem.items():
+                if name_c in s or s in name_c:
+                    return stored_key
+        return None
 
-    # 2) Fallback: match by PLAY_NAME (canonical stem equals)
-    name_c = _stem_canon(row.get('PLAY_NAME', ''))
-    if name_c in _image_by_stem:
-        return _image_by_stem[name_c]
-
-    # 3) Last resort: soft contains between canonical stems
-    if name_c:
-        for s, stored_key in _image_by_stem.items():
-            if name_c in s or s in name_c:
-                return stored_key
-
-    return None
-
-def _img_tag(row):
-    if not include_imgs or not images_map:
-        return ''
-    key = _find_image(row)
-    if not key:
-        return ''
-    b = images_map.get(key)
-    if not b:
-        return ''
-    b64 = base64.b64encode(b).decode('utf-8')
-    return f"<img class='thumb' src='data:{_guess_mime(key)};base64,{b64}' />"
+    def _img_tag(row):
+        if not include_imgs or not images_map:
+            return ''
+        key = _find_image(row)
+        if not key:
+            return ''
+        b = images_map.get(key)
+        if not b:
+            return ''
+        b64 = base64.b64encode(b).decode('utf-8')
+        return f"<img class='thumb' src='data:{_guess_mime(key)};base64,{b64}' />"
 
     def _esc(x):
         import html as _html
         return _html.escape('' if x is None else str(x))
 
-    parts = []
-    parts.append(f"""
-    <style>
-    @media print {{
-      @page {{ size: Letter landscape; margin: 0.35in; }}
-      body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-    }}
-    body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
-    .bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
-    .bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
-    .row {{ display:flex; align-items:flex-start; gap:10px; padding:8px 10px; border-top:1px solid #eee; }}
-    .info {{ flex:1 1 auto; min-width:0; }}
-    .thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; margin-left:auto; }}
-    .main {{ font-weight:700; font-size:14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
-    .stars {{ color:#f59e0b; }}
-    .badges {{ opacity:0.9; }}
-    .meta {{ font-size:12px; color:#334155; }}
-    </style>
-    """)
+    # If no call_sheet exists yet, skip gracefully
+    if 'call_sheet' not in locals() or not isinstance(call_sheet, pd.DataFrame) or call_sheet.empty:
+        st.info("No plays selected for the one-pager yet.")
+    else:
+        parts = []
+        parts.append(f"""
+        <style>
+        @media print {{
+          @page {{ size: Letter landscape; margin: 0.35in; }}
+          body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+        }}
+        body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
+        .bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
+        .bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
+        .row {{ display:flex; align-items:flex-start; gap:10px; padding:8px 10px; border-top:1px solid #eee; }}
+        .info {{ flex:1 1 auto; min-width:0; }}
+        .thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; margin-left:auto; }}
+        .main {{ font-weight:700; font-size:14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
+        .stars {{ color:#f59e0b; }}
+        .badges {{ opacity:0.9; }}
+        .meta {{ font-size:12px; color:#334155; }}
+        </style>
+        """)
 
-    for bucket, dfb in call_sheet.groupby('Bucket', sort=False):
-        parts.append(f"<div class='bucket'><div class='bktitle'>{_esc(bucket)}</div>")
-        for _, r in dfb.iterrows():
-            name = _esc(r.get('PLAY_NAME',''))
-            stars = '⭐' * int(r.get('PRIORITY', 1))
-            badges = _esc(r.get('ICONS',''))
-            form = _esc(r.get('FORMATION',''))
-            strn = _esc(r.get('STRENGTH',''))
-            pers = _esc(r.get('PERSONNEL',''))
-            cov = _esc(r.get('COVERAGE_TAGS',''))
-            press = _esc(r.get('PRESSURE_TAGS',''))
-            situ = _esc(r.get('SITUATION_TAGS',''))
-            concept = _esc(r.get('CONCEPT_TAGS',''))
-            meta_bits = [x for x in [f"{form} {strn}".strip(), f"Pers {pers}" if pers else '', situ] if x]
-            meta_line = ' | '.join(meta_bits)
-            tags_line = ' • '.join([x for x in [concept, cov, press] if x])
-            img = _img_tag(r)
-            parts.append(f"""
-              <div class='row'>
-                <div class='info'>
-                  <div class='main'>{name} <span class='stars'>{stars}</span> <span class='badges'>{badges}</span></div>
-                  <div class='meta'>{_esc(meta_line)}</div>
-                  {f"<div class='meta'>{_esc(tags_line)}</div>" if tags_line else ''}
-                </div>
-                {img}
-              </div>
-            """)
-        parts.append("</div>")
+        for bucket, dfb in call_sheet.groupby('Bucket', sort=False):
+            parts.append(f"<div class='bucket'><div class='bktitle'>{_esc(bucket)}</div>")
+            for _, r in dfb.iterrows():
+                name   = _esc(r.get('PLAY_NAME',''))
+                stars  = '⭐' * int(r.get('PRIORITY', 1))
+                badges = _esc(r.get('ICONS',''))
+                form   = _esc(r.get('FORMATION','')); strn = _esc(r.get('STRENGTH',''))
+                pers   = _esc(r.get('PERSONNEL',''))
+                cov    = _esc(r.get('COVERAGE_TAGS','')); press = _esc(r.get('PRESSURE_TAGS',''))
+                situ   = _esc(r.get('SITUATION_TAGS',''))
+                concept= _esc(r.get('CONCEPT_TAGS',''))
+                meta_bits = [x for x in [f"{form} {strn}".strip(), f"Pers {pers}" if pers else '', situ] if x]
+                meta_line = ' | '.join(meta_bits)
+                tags_line = ' • '.join([x for x in [concept, cov, press] if x])
+                img = _img_tag(r)
+                parts.append(f"""
+                  <div class='row'>
+                    <div class='info'>
+                      <div class='main'>{name} <span class='stars'>{stars}</span> <span class='badges'>{badges}</span></div>
+                      <div class='meta'>{_esc(meta_line)}</div>
+                      {f"<div class='meta'>{_esc(tags_line)}</div>" if tags_line else ''}
+                    </div>
+                    {img}
+                  </div>
+                """)
+            parts.append("</div>")
 
-    # ✅ FIX: terminate the string correctly
-    html_str = "\n".join(parts)
-
-    st.components.v1.html(html_str, height=800, scrolling=True)
-    st.download_button(
-        "⬇️ Download OC_OnePager_v2.html",
-        data=html_str.encode('utf-8'),
-        file_name="OC_OnePager_v2.html",
-        mime="text/html",
-    )
+        html_str = "\n".join(parts)
+        st.components.v1.html(html_str, height=800, scrolling=True)
+        st.download_button(
+            "⬇️ Download OC_OnePager_v2.html",
+            data=html_str.encode('utf-8'),
+            file_name="OC_OnePager_v2.html",
+            mime="text/html",
+        )
 except Exception as _e:
     st.warning(f"One-Pager build skipped: {_e}")
-
 # -----------------------
 # Offense-Focused Matchup Builder
 # -----------------------
