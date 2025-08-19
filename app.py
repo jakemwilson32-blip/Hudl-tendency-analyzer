@@ -186,7 +186,7 @@ def compute_coverage(df: pd.DataFrame, dims):
 
 
 def serialize_playbook(pb: dict) -> dict:
-    out = {'plays': pb.get('plays', []), 'images': {}, 'sheets_csv_url': st.session_state.get('SHEETS_CSV_URL',''), 'sheets_write_url': st.session_state.get('SHEETS_WRITE_URL','')}
+    out = {'plays': pb.get('plays', []), 'images': {}, 'sheets_csv_url': st.session_state.get('SHEETS_CSV_URL',''), 'sheets_write_url': st.session_state.get('SHEETS_WRITE_URL',''), 'favorites': sorted(st.session_state.get('FAVORITES', set()))}
     for fname, b in pb.get('images', {}).items():
         try: out['images'][fname] = base64.b64encode(b).decode('utf-8')
         except Exception: pass
@@ -200,7 +200,8 @@ def deserialize_playbook(pb_json: dict) -> dict:
         except Exception: pass
     st.session_state['SHEETS_CSV_URL'] = pb_json.get('sheets_csv_url', '')
     st.session_state['SHEETS_WRITE_URL'] = pb_json.get('sheets_write_url', '')
-    return pb
+st.session_state['FAVORITES'] = set(pb_json.get('favorites', []))
+return pb
 
 
 def push_playbook_to_webhook(url: str, rows: list) -> str:
@@ -224,24 +225,24 @@ def ui_table(title: str, df: pd.DataFrame, chart: bool=False, pivot=None):
         except Exception:
             pass
 
+
 def handle_image_uploads(files):
     if not files:
         return
+    added = added_from_zip = skipped = dup = 0
     images = st.session_state.PLAYBOOK.setdefault('images', {})
     exts = {'.png', '.jpg', '.jpeg', '.webp'}
 
-    added = added_from_zip = skipped = dup = 0
-
     for f in files:
-        name = f.name
-        if name.lower().endswith('.zip'):
+        fname = f.name
+        if fname.lower().endswith('.zip'):
             try:
                 data = f.read()
                 with zipfile.ZipFile(io.BytesIO(data)) as zf:
                     for zi in zf.infolist():
-                        # skip directories & macOS resource files
                         if zi.is_dir():
                             continue
+                        # skip macOS resource files and folders
                         if zi.filename.startswith('__MACOSX/') or Path(zi.filename).name.startswith('._'):
                             continue
                         ext = Path(zi.filename).suffix.lower()
@@ -249,16 +250,16 @@ def handle_image_uploads(files):
                             skipped += 1
                             continue
                         try:
-                            buf = zf.read(zi.filename)  # use filename here
+                            buf = zf.read(zi)
                         except Exception:
                             skipped += 1
                             continue
-
                         base = Path(zi.filename).name
                         stem = Path(base).stem
                         key = base
                         idx = 1
-                        while key in images:  # de-dup so we don't overwrite
+                        # de-duplicate filenames so multiple images with the same name don't overwrite
+                        while key in images:
                             dup += 1
                             key = f"{stem}_{idx}{ext}"
                             idx += 1
@@ -266,26 +267,27 @@ def handle_image_uploads(files):
                         added += 1
                         added_from_zip += 1
             except Exception as e:
-                st.error(f"Couldn't read zip '{name}': {e}")
+                st.error(f"Couldn't read zip '{fname}': {e}")
         else:
-            ext = Path(name).suffix.lower()
-            if ext in exts:
-                base = Path(name).name
-                stem = Path(base).stem
-                key = base
-                idx = 1
-                while key in images:
-                    dup += 1
-                    key = f"{stem}_{idx}{ext}"
-                    idx += 1
-                images[key] = f.read()
-                added += 1
-            else:
+            try:
+                ext = Path(fname).suffix.lower()
+                if ext in exts:
+                    base = Path(fname).name
+                    stem = Path(base).stem
+                    key = base
+                    idx = 1
+                    while key in images:
+                        dup += 1
+                        key = f"{stem}_{idx}{ext}"
+                        idx += 1
+                    images[key] = f.read()
+                    added += 1
+                else:
+                    skipped += 1
+            except Exception:
                 skipped += 1
 
-    msg = f"Stored {added} image(s)"
-    if added_from_zip:
-        msg += f" ({added_from_zip} from zip)"
+    msg = f"Stored {added} image(s)" + (f" ({added_from_zip} from zip)" if added_from_zip else '')
     if dup:
         msg += f"; handled {dup} duplicate name(s)"
     if skipped:
@@ -298,101 +300,85 @@ def handle_image_uploads(files):
 def safe_rate(n, d):
     return (n / d) if d else 0.0
 
+
 def build_suggestions(overall, by_down, by_dist, by_form, blitz_3rd, cov_3rd, hash_tbl, motion_tbl, sample_size, sr_overall, xpl_overall):
-    """Robust when grouped tables are empty or missing columns."""
+    """Robust to empty/missing columns in grouped tables."""
     suggestions = []
 
-    # Sample size + overall mix
+    # Sample size & overall mix
     if sample_size < 25:
         suggestions.append(f"Warning: small sample ({sample_size} plays). Treat tendencies with caution.")
-
     total = overall["plays"].sum() if len(overall) else 0
-    if len(overall) and {"PLAY_TYPE_NORM", "plays"} <= set(overall.columns):
-        rp = overall[overall["PLAY_TYPE_NORM"].isin(["Run", "Pass", "Screen"])]
-        run_p   = (rp[rp["PLAY_TYPE_NORM"] == "Run"]["plays"].sum()   / total) if total else 0
-        pass_p  = (rp[rp["PLAY_TYPE_NORM"] == "Pass"]["plays"].sum()  / total) if total else 0
-        screen_p= (rp[rp["PLAY_TYPE_NORM"] == "Screen"]["plays"].sum()/ total) if total else 0
+    rp = overall[overall.get("PLAY_TYPE_NORM", pd.Series(index=overall.index)).isin(["Run","Pass","Screen"]) ] if len(overall) else overall
+    run_p = (rp[rp.get("PLAY_TYPE_NORM")=="Run"]["plays"].sum() / total) if total else 0
+    pass_p = (rp[rp.get("PLAY_TYPE_NORM")=="Pass"]["plays"].sum() / total) if total else 0
+    screen_p = (rp[rp.get("PLAY_TYPE_NORM")=="Screen"]["plays"].sum() / total) if total else 0
+    if run_p >= 0.60:
+        suggestions.append(f"Run-heavy profile overall ({run_p:.0%}). Def: extra fitter on early downs; Off: play-action shots.")
+    elif pass_p >= 0.60:
+        suggestions.append(f"Pass-heavy profile overall ({pass_p:.0%}). Def: simulated pressures, late rotation from two-high.")
+    if screen_p >= 0.10:
+        suggestions.append(f"Screens appear {screen_p:.0%}. DL retrace; keep RB/WR/TE screen menu ready.")
 
-        if run_p >= 0.60:
-            suggestions.append(f"Run-heavy profile overall ({run_p:.0%}). Def: extra fitter on early downs; Off: play-action shots.")
-        elif pass_p >= 0.60:
-            suggestions.append(f"Pass-heavy profile overall ({pass_p:.0%}). Def: simulated pressures, late rotation from two-high.")
-        if screen_p >= 0.10:
-            suggestions.append(f"Screens appear {screen_p:.0%}. DL retrace; keep RB/WR/TE screen menu ready.")
-
-    # Efficiency context
+    # Efficiency
     if not np.isnan(sr_overall):
         suggestions.append(f"Estimated success rate: {sr_overall:.0%} (success = gain ≥ yard-to-go on 1st/2nd, or conversion on 3rd).")
     if not np.isnan(xpl_overall):
         suggestions.append(f"Explosive rate: {xpl_overall:.0%} (10+ rush / 15+ pass).")
 
     # By Down
-    if len(by_down) and {"DN", "PLAY_TYPE_NORM", "%"} <= set(by_down.columns):
-        for d in [1, 2, 3]:
-            sub = by_down[by_down["DN"] == d]
+    if isinstance(by_down, pd.DataFrame) and len(by_down) and "DN" in by_down.columns:
+        for d in [1,2,3]:
+            sub = by_down[by_down["DN"]==d]
             if len(sub):
-                types = set(sub["PLAY_TYPE_NORM"])
-                r = sub[sub["PLAY_TYPE_NORM"] == "Run"]["%"].sum()  if "Run"  in types else 0
-                p = sub[sub["PLAY_TYPE_NORM"] == "Pass"]["%"].sum() if "Pass" in types else 0
-                if d == 1 and r >= 60:
+                types = set(sub.get("PLAY_TYPE_NORM", pd.Series(dtype=object)))
+                r = sub[sub.get("PLAY_TYPE_NORM")=="Run"]["%"].sum() if "Run" in types else 0
+                p = sub[sub.get("PLAY_TYPE_NORM")=="Pass"]["%"].sum() if "Pass" in types else 0
+                if d==1 and r>=60:
                     suggestions.append("1st down leans run. Fit downhill; be alert for play-action off base runs.")
-                if d == 3 and p >= 70:
+                if d==3 and p>=70:
                     suggestions.append("3rd down leans pass. Def: simulated pressure, play the sticks. Off: quick man/zone beaters.")
 
     # 3rd & Distance
-    if len(by_dist) and {"DN", "DIST_BUCKET", "PLAY_TYPE_NORM", "%"} <= set(by_dist.columns):
-        td = by_dist[by_dist["DN"] == 3]
+    if isinstance(by_dist, pd.DataFrame) and len(by_dist) and all(c in by_dist.columns for c in ["DN","DIST_BUCKET","PLAY_TYPE_NORM","%"]):
+        td = by_dist[by_dist["DN"]==3]
         if len(td):
-            lp = td[(td["DIST_BUCKET"] == "long (7-10)") & (td["PLAY_TYPE_NORM"] == "Pass")]
+            lp = td[(td["DIST_BUCKET"]=="long (7-10)") & (td["PLAY_TYPE_NORM"]=="Pass")]
             if len(lp) and lp["%"].iloc[0] >= 70:
                 suggestions.append("3rd & 7–10 high pass tendency. Off: Flood/Sail or Dagger. Def: mug A-gaps, spin to 3-robber.")
-            vl = td[(td["DIST_BUCKET"] == "very long (11+)") & (td["PLAY_TYPE_NORM"] == "Pass")]
+            vl = td[(td["DIST_BUCKET"]=="very long (11+)") & (td["PLAY_TYPE_NORM"]=="Pass")]
             if len(vl) and vl["%"].iloc[0] >= 80:
                 suggestions.append("3rd & 11+ = must-pass. Spy QB if mobile; Off: max-protect shots vs soft zone.")
 
     # Top formation
-    if len(by_form) and {"OFF_FORM", "PLAY_TYPE_NORM", "plays", "%"} <= set(by_form.columns):
-        top_form = by_form.groupby(["OFF_FORM"])["plays"].sum().reset_index().sort_values("plays", ascending=False).head(1)
+    if isinstance(by_form, pd.DataFrame) and len(by_form) and all(c in by_form.columns for c in ["OFF_FORM","PLAY_TYPE_NORM","%","plays"]):
+        top_form = by_form.groupby(["OFF_FORM"])['plays'].sum().reset_index().sort_values("plays", ascending=False).head(1)
         if len(top_form):
             f = str(top_form["OFF_FORM"].iloc[0])
-            f_tbl = by_form[by_form["OFF_FORM"] == f]
-            types = set(f_tbl["PLAY_TYPE_NORM"])
-            run_bias = f_tbl[f_tbl["PLAY_TYPE_NORM"] == "Run"]["%"].sum() if "Run" in types else 0
+            f_tbl = by_form[by_form["OFF_FORM"]==f]
+            types = set(f_tbl.get("PLAY_TYPE_NORM", pd.Series(dtype=object)))
+            run_bias = f_tbl[f_tbl.get("PLAY_TYPE_NORM")=="Run"]["%"].sum() if "Run" in types else 0
             if run_bias >= 65:
                 suggestions.append(f"In {f}, strong run tendency (~{run_bias:.0f}%). Def: set edges, close interior gaps. Off: play-action counters from same look.")
 
-    # 3rd-down pressure & coverage
-    if len(blitz_3rd) and "blitz_rate" in blitz_3rd.columns:
+    # 3rd down pressure & coverage
+    if isinstance(blitz_3rd, pd.DataFrame) and len(blitz_3rd) and "blitz_rate" in blitz_3rd.columns:
         if (blitz_3rd["blitz_rate"] >= 0.35).any():
             suggestions.append("They pressure on 3rd (≥35%). Off: screens, quick game, hot throws; consider max-protect shots.")
-    if len(cov_3rd) and {"COVERAGE_N", "plays"} <= set(cov_3rd.columns):
-        top_cov = cov_3rd.groupby(["COVERAGE_N"])["plays"].sum().reset_index().sort_values("plays", ascending=False).head(1)
+    if isinstance(cov_3rd, pd.DataFrame) and len(cov_3rd) and all(c in cov_3rd.columns for c in ["COVERAGE_N","plays"]):
+        top_cov = cov_3rd.groupby(["COVERAGE_N"])['plays'].sum().reset_index().sort_values("plays", ascending=False).head(1)
         if len(top_cov):
             cov = top_cov["COVERAGE_N"].iloc[0]
-            if cov in {"COVER 1","C1","MAN","COVER1"}:
-                suggestions.append("3rd = Man. Off: Mesh, rub/stack, option routes, back-shoulder.")
-            if cov in {"COVER 3","C3","THREE","COVER3"}:
-                suggestions.append("3rd = Cover 3 (MOFC). Off: Flood/Sail, Curl-Flat, Dagger; attack seams/curl window.")
-            if cov in {"COVER 4","C4","QUARTERS"}:
-                suggestions.append("3rd = Quarters. Off: posts & benders, scissors, deep overs.")
+            if cov in {"COVER 1","C1","MAN","COVER1"}: suggestions.append("3rd = Man. Off: Mesh, rub/stack, option routes, back-shoulder.")
+            if cov in {"COVER 3","C3","THREE","COVER3"}: suggestions.append("3rd = Cover 3 (MOFC). Off: Flood/Sail, Curl-Flat, Dagger; attack seams/curl window.")
+            if cov in {"COVER 4","C4","QUARTERS"}: suggestions.append("3rd = Quarters. Off: posts & benders, scissors, deep overs.")
 
     # Hash tendencies
-    if len(hash_tbl) and {"HASH_N", "%"} <= set(hash_tbl.columns):
-        left  = hash_tbl[hash_tbl["HASH_N"] == "L"]["%"].sum() if (hash_tbl["HASH_N"] == "L").any() else 0
-        right = hash_tbl[hash_tbl["HASH_N"] == "R"]["%"].sum() if (hash_tbl["HASH_N"] == "R").any() else 0
-        if left >= 55:
-            suggestions.append("Left-hash bias. Off: set strength to field; Def: set strength to boundary, fit fast to field.")
-        if right >= 55:
-            suggestions.append("Right-hash bias. Off: formation into field with RPO/screens; Def: rotate down to wide side.")
-
-    # Motion usage
-    if len(motion_tbl) and "%" in motion_tbl.columns:
-        if (motion_tbl["%"] >= 50).any():
-            suggestions.append("Heavy motion usage. Off: use motion to ID coverage/leverage; Def: bump/roll with motion.")
-
-    if not suggestions:
-        suggestions.append("Tendencies balanced. Build a call sheet with answers by situation: pressure answers, man beaters, Cover 3/Quarters concepts, and screen menu.")
-    return suggestions
+    if isinstance(hash_tbl, pd.DataFrame) and len(hash_tbl) and all(c in hash_tbl.columns for c in ["HASH_N","%"]):
+        left = hash_tbl[hash_tbl["HASH_N"]=="L"]["%"].sum() if (hash_tbl["HASH_N"]=="L").any() else 0
+        right = hash_tbl[hash_tbl["HASH_N"]=="R"]["%"].sum() if (hash_tbl["HASH_N"]=="R").any() else 0
+        if left >= 55: suggestions.append("Left-hash bias. Off: set strength to field; Def: set strength to boundary, fit fast to field.")
+        if right >= 55: suggestions.ap
 
 # -----------------------
 # Session defaults
@@ -407,6 +393,8 @@ if 'CONCEPT_FORMATION_RULES' not in st.session_state:
     st.session_state.CONCEPT_FORMATION_RULES = {'TRAIN': ['TRIPS']}
 if 'SCREEN_RECIPIENT_ORDER' not in st.session_state:
     st.session_state.SCREEN_RECIPIENT_ORDER = ['Y','Z','H','X','F']
+if 'FAVORITES' not in st.session_state:
+    st.session_state.FAVORITES = set()
 
 # -----------------------
 # Sidebar
@@ -432,28 +420,21 @@ with col_pb1:
             st.error(f"Couldn't load playbook.json: {e}")
 
     st.markdown("**Upload play images** (PNG/JPG/WEBP or ZIP). Name files to match FILE_NAME in your index, or exactly the PLAY_NAME.")
-    uploads = st.file_uploader(
-    "Add play screenshots/diagrams (PNG/JPG/WEBP or .zip)",
-    type=["png","jpg","jpeg","webp","zip"],
-    accept_multiple_files=True,
-    key="pbimgs",
-)
+    uploads = st.file_uploader("Add play screenshots/diagrams (PNG/JPG/WEBP or .zip)", type=["png","jpg","jpeg","webp","zip"], accept_multiple_files=True, key="pbimgs")
     if uploads:
         handle_image_uploads(uploads)
+    # Quick sanity check so you can confirm images were stored
+if st.session_state.PLAYBOOK.get('images'):
+    st.caption(f"Library images: {len(st.session_state.PLAYBOOK['images'])}")
 
-    # Quick sanity check / preview so you can confirm images were stored
-    if st.session_state.PLAYBOOK.get('images'):
-        st.caption(f"Library images: {len(st.session_state.PLAYBOOK['images'])}")
-        if st.checkbox("Preview first 8 images", value=False, key="img_preview"):
-            keys = list(st.session_state.PLAYBOOK['images'].keys())[:8]
-            cols = st.columns(max(1, len(keys)))
-            for i, k in enumerate(keys):
-                with cols[i]:
-                    st.caption(k)
-                    st.image(st.session_state.PLAYBOOK['images'][k])
+# ⭐ Favorites UI (persisted in playbook.json)
+with st.expander("⭐ Favorites (persisted)", expanded=False):
+    lib_names = [p.get('PLAY_NAME','') for p in st.session_state.PLAYBOOK.get('plays',[])]
+    current = sorted(st.session_state.get('FAVORITES', set()))
+    picked = st.multiselect("Mark favorite plays", options=lib_names, default=current)
+    st.session_state.FAVORITES = set(picked)
 
-    st.markdown("**Index your plays with a CSV** (or add rows manually).")
-    st.download_button("Download Play Index CSV Template", data=play_index_template_bytes(), file_name="play_index_template.csv", mime="text/csv")
+st.download_button("Download Play Index CSV Template", data=play_index_template_bytes(), file_name="play_index_template.csv", mime="text/csv")
     play_index_csv = st.file_uploader("Upload play_index.csv (" + ", ".join(PLAYBOOK_COLS) + ")", type=["csv"], key="pbidx")
     if play_index_csv:
         try:
@@ -583,7 +564,7 @@ with col3:
     eff = []
     if not np.isnan(sr_overall): eff.append(f"Success rate: {sr_overall:.0%}")
     if not np.isnan(xpl_overall): eff.append(f"Explosive rate: {xpl_overall:.0%}")
-    if eff: st.write("\n".join(eff))
+    if eff: st.write("\\n".join(eff))
     else: st.info("Add GN_LS (gain/loss) to compute success & explosive rates.")
 
 st.divider()
@@ -648,6 +629,31 @@ st.markdown("**Run Game:** " + ", ".join(RUN_GAME))
 # -----------------------
 # Playbook-Only Planner
 # -----------------------
+# -----------------------
+# Priority & badge helpers
+# -----------------------
+
+def _icons_for_row(r: pd.Series) -> str:
+    txt = (" ".join([str(r.get(k,'')) for k in ['CONCEPT_TAGS','SITUATION_TAGS','COVERAGE_TAGS','PRESSURE_TAGS']])).lower()
+    icons = []
+    if any(k in txt for k in ['quick','stick','snag','rpo','hitch','slant']): icons.append('⚡')
+    if any(k in txt for k in ['rz','red zone','money','atm']): icons.append('🔴')
+    if any(k in txt for k in ['vs c3','vs cover 3',' cover 3',' c3 ']): icons.append('3️⃣')
+    if any(k in txt for k in ['vs blitz',' pressure','blitz']): icons.append('🚨')
+    return " ".join(icons)
+
+def _priority_for_row(r: pd.Series, score: Optional[float] = None) -> int:
+    base = 1.0
+    if r.get('PLAY_NAME') in st.session_state.get('FAVORITES', set()):
+        base += 1.5
+    ct = str(r.get('CONCEPT_TAGS','')).lower()
+    if any(k in ct for k in ['screen','bubble','tunnel']): base += 0.5
+    if any(k in ct for k in ['inside zone','iz','outside zone','oz','power','counter']): base += 0.5
+    if score is not None:
+        try: base += min(2.0, max(0.0, float(score))) * 0.5
+        except Exception: pass
+    return int(max(1, min(5, round(base))))
+
 st.subheader("Playbook-Only Planner (No Opponent Data)")
 lib = pd.DataFrame(st.session_state.PLAYBOOK.get('plays', []))
 if lib.empty:
@@ -662,7 +668,7 @@ else:
             if key in txt: return key
         return None
 
-    def _pick_varied(df: pd.DataFrame, keywords: List[str], limit: int = 6) -> pd.DataFrame:
+    def _pick_varied(df: pd.DataFrame, keywords: List[str], limit: Optional[int] = None) -> pd.DataFrame:
         mask = df.apply(lambda r: _text_contains((r.get('CONCEPT_TAGS','') + ' ' + r.get('SITUATION_TAGS','')), keywords), axis=1)
         cand = df[mask].copy() if mask.any() else df.copy()
         picked, used_names, used_forms = [], set(), set()
@@ -670,7 +676,7 @@ else:
             name, form = r.get('PLAY_NAME'), r.get('FORMATION')
             if name in used_names or form in used_forms: continue
             picked.append(r); used_names.add(name); used_forms.add(form)
-            if len(picked) >= limit: break
+            if limit and len(picked) >= limit: break
         return pd.DataFrame(picked)
 
     rules = st.session_state.get('CONCEPT_FORMATION_RULES', {})
@@ -695,7 +701,7 @@ else:
 
     call_rows = []
     for bucket, keys in buckets.items():
-        picked = _pick_varied(lib2, [k.lower() for k in keys], limit=6)
+        picked = _pick_varied(lib2, [k.lower() for k in keys], limit=None)
         if not picked.empty:
             picked = picked[["PLAY_NAME","PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS","COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]]
             picked.insert(0, "Bucket", bucket)
@@ -720,10 +726,102 @@ else:
             prefix = (form + (' ' + strength if strength else '')).strip()
             call_sheet.at[idx,'RECIPIENT_LETTER'] = recip
             call_sheet.at[idx,'CALL'] = (f"{prefix}. " if prefix else '') + f"{recip.lower()}-{concept.lower()}"
-        cols = ["Bucket","CALL","PLAY_NAME","RECIPIENT_LETTER","PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS","COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]
+        # annotate with icons and priority
+        call_sheet['ICONS'] = call_sheet.apply(_icons_for_row, axis=1)
+        call_sheet['PRIORITY'] = call_sheet.apply(_priority_for_row, axis=1)
+        cols = ["Bucket","PLAY_NAME","PRIORITY","ICONS","PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS","COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME","CALL","RECIPIENT_LETTER"]
         call_sheet = call_sheet[[c for c in cols if c in call_sheet.columns]]
         st.dataframe(call_sheet)
         st.download_button("⬇️ Download Call_Sheet_PlaybookOnly.csv", data=call_sheet.to_csv(index=False).encode("utf-8"), file_name="Call_Sheet_PlaybookOnly.csv", mime="text/csv")
+
+        # ----- Printable One-Pager (Ratings + Badges, image on right) -----
+        try:
+            images_map = st.session_state.PLAYBOOK.get('images', {})
+            include_imgs = st.checkbox("Include play art (from uploaded images)", True, key="onepager_imgs")
+            thumb_px = st.slider("Thumbnail size (px)", 60, 140, 90, 10, key="onepager_thumb")
+            def _canon(s: str) -> str:
+                import re, unicodedata
+                t = unicodedata.normalize('NFKD', str(s or '')).encode('ascii','ignore').decode('ascii')
+                return re.sub(r'[^a-z0-9]+','', t.lower())
+            def _guess_mime(name):
+                n = str(name or '').lower()
+                if n.endswith(('.jpg','.jpeg')): return 'image/jpeg'
+                if n.endswith('.webp'): return 'image/webp'
+                return 'image/png'
+            def _find_image(row) -> Optional[str]:
+                fn = str(row.get('FILE_NAME') or '').strip()
+                if fn and fn in images_map: return fn
+                # simple fuzzy: match by play name against filename stem
+                pname = _canon(row.get('PLAY_NAME',''))
+                best,score=None,0.0
+                for fname in images_map.keys():
+                    stem = _canon(Path(fname).stem)
+                    sc = 1.0 if pname and pname in stem else 0.0
+                    if sc>score: best,score=fname,sc
+                return best if score>=1.0 else None
+            def _img_tag(row):
+                if not include_imgs or not images_map: return ''
+                fn = _find_image(row)
+                if not fn: return ''
+                b = images_map.get(fn)
+                if not b: return ''
+                import base64
+                b64 = base64.b64encode(b).decode('utf-8')
+                return f"<img class='thumb' src='data:{_guess_mime(fn)};base64,{b64}' />"
+            def _esc(x):
+                import html as _html
+                return _html.escape('' if x is None else str(x))
+            parts = []
+            parts.append(f"""
+            <style>
+            @media print {{
+              @page {{ size: Letter landscape; margin: 0.35in; }}
+              body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+            }}
+            body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
+            .bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
+            .bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
+            .row {{ display:flex; align-items:flex-start; gap:10px; padding:8px 10px; border-top:1px solid #eee; }}
+            .info {{ flex:1 1 auto; min-width:0; }}
+            .thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; margin-left:auto; }}
+            .main {{ font-weight:700; font-size:14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
+            .stars {{ color:#f59e0b; }}
+            .badges {{ opacity:0.9; }}
+            .meta {{ font-size:12px; color:#334155; }}
+            </style>
+            """)
+            for bucket, dfb in call_sheet.groupby('Bucket', sort=False):
+                parts.append(f"<div class='bucket'><div class='bktitle'>{_esc(bucket)}</div>")
+                for _, r in dfb.iterrows():
+                    name=_esc(r.get('PLAY_NAME',''))
+                    stars='⭐'*int(r.get('PRIORITY',1))
+                    badges=_esc(r.get('ICONS',''))
+                    form=_esc(r.get('FORMATION','')); strn=_esc(r.get('STRENGTH',''))
+                    pers=_esc(r.get('PERSONNEL',''))
+                    cov=_esc(r.get('COVERAGE_TAGS','')); press=_esc(r.get('PRESSURE_TAGS',''))
+                    situ=_esc(r.get('SITUATION_TAGS',''))
+                    concept=_esc(r.get('CONCEPT_TAGS',''))
+                    meta_bits=[x for x in [f"{form} {strn}".strip(), f"Pers {pers}" if pers else '', situ] if x]
+                    meta_line=' | '.join(meta_bits)
+                    tags_line=' • '.join([x for x in [concept, cov, press] if x])
+                    img=_img_tag(r)
+                    parts.append(f"""
+                      <div class='row'>
+                        <div class='info'>
+                          <div class='main'>{name} <span class='stars'>{stars}</span> <span class='badges'>{badges}</span></div>
+                          <div class='meta'>{_esc(meta_line)}</div>
+                          {f"<div class='meta'>{_esc(tags_line)}</div>" if tags_line else ''}
+                        </div>
+                        {img}
+                      </div>
+                    """)
+                parts.append("</div>")
+            html_str = "
+".join(parts)
+            st.components.v1.html(html_str, height=800, scrolling=True)
+            st.download_button("⬇️ Download OC_OnePager_v2.html", data=html_str.encode('utf-8'), file_name="OC_OnePager_v2.html", mime="text/html")
+        except Exception as _e:
+            st.warning(f"One-Pager build skipped: {_e}")
     else:
         st.info("Could not find plays matching the standard buckets. Add situation tags like '1st&10', '3rd&7-10', or concept tags (Snag, Flood, Mesh, Smash, Dagger, Screen, IZ/OZ/Power/Counter).")
 
@@ -774,9 +872,7 @@ with st.expander("Offense-Focused Matchup Builder (Our O vs Their D)", expanded=
             def _contains(row):
                 hay = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('SITUATION_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).lower();
                 return any(k in hay for k in keywords)
-            cand = df[df.apply(_contains, axis=1)].copy()
-            if cand.empty:
-                cand = df.copy()
+            cand = df[df.apply(_contains, axis=1)].co
             cand = cand.sort_values("__SCORE__", ascending=False)
             picked, used_names, used_forms = [], set(), set()
             for _, rr in cand.iterrows():
@@ -784,168 +880,3 @@ with st.expander("Offense-Focused Matchup Builder (Our O vs Their D)", expanded=
                 if name in used_names or form in used_forms: continue
                 picked.append(rr); used_names.add(name); used_forms.add(form)
                 if len(picked) >= limit: break
-            return pd.DataFrame(picked)
-        call_rows2 = []
-        buckets2 = {
-            "1st & 10": ["1st&10","quick","inside zone","iz","outside zone","oz","power","counter","rpo","play-action","boot"],
-            "2nd & medium (4-6)": ["2nd&medium","quick","screen","draw","counter","boot","pa"],
-            "3rd & short (1-3)": ["3rd&1-3","hitch","slant","snag","mesh","iso","power","qb sneak"],
-            "3rd & medium (4-6)": ["3rd&4-6","snag","smash","flood","curl-flat","mesh","screen"],
-            "3rd & long (7-10)": ["3rd&7-10","dagger","flood","smash","screen","wheel"],
-            "Red Zone": ["rz","money","atm","smash","snag","fade","rub","pick"],
-            "2-minute": ["2-minute","hurry","sideline","dagger","curl-flat","out","arrow"],
-        }
-        for bucket, keys in buckets2.items():
-            got = _pick_top(lib_scored, [k.lower() for k in keys], limit=6)
-            if not got.empty:
-                got = got[["PLAY_NAME","PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS","COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]]
-                got.insert(0, "Bucket", bucket)
-                call_rows2.append(got)
-        if call_rows2:
-            call_sheet = pd.concat(call_rows2, ignore_index=True)
-            base = (call_sheet["FORMATION"].fillna("").str.strip() + " " + call_sheet["STRENGTH"].fillna("").str.strip()).str.strip()
-            call_sheet["CALL"] = base.where(base.eq(""), base + ". ") + call_sheet["PLAY_NAME"].fillna("")
-            st.success("Built matchup-optimized call sheet from library + opponent profile.")
-            st.dataframe(call_sheet)
-            st.download_button("⬇️ Download Call_Sheet_Matchup.csv", data=call_sheet.to_csv(index=False).encode('utf-8'), file_name="Call_Sheet_Matchup.csv", mime="text/csv")
-        else:
-            st.info("No matchup picks found — add tags like 'vs Man / vs C3 / vs Quarters / vs Blitz' in your play index.")
-
-# -----------------------
-# Printable One-Pager
-# -----------------------
-try:
-    if 'call_sheet' in locals() and isinstance(call_sheet, pd.DataFrame) and not call_sheet.empty:
-        st.subheader("Printable One-Pager")
-        st.caption("Thumbnails match by FORMATION + PLAY NAME (motions ignored). Provide FILE_NAME to override.")
-        include_imgs = st.checkbox("Include play art (from uploaded images)", True)
-        thumb_px = st.slider("Thumbnail size (px)", 60, 140, 90, 10)
-        images_map = st.session_state.PLAYBOOK.get('images', {})
-
-        def _guess_mime(name):
-            n = str(name or '').lower()
-            if n.endswith(('.jpg','.jpeg')): return 'image/jpeg'
-            if n.endswith('.webp'): return 'image/webp'
-            return 'image/png'
-
-        def _canon(s: str) -> str:
-            import re, unicodedata
-            t = unicodedata.normalize('NFKD', str(s or '')).encode('ascii','ignore').decode('ascii')
-            t = t.lower().replace('&','and')
-            return re.sub(r'[^a-z0-9]+','', t)
-
-        def _strip_motions(txt: str) -> str:
-            if not txt: return ''
-            letters = set("XYHZF")
-            known = {"OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YOYO","YO-YO","TIP"}
-            kept = []
-            for tok in str(txt).split():
-                if '-' in tok:
-                    a, b = tok.split('-',1)
-                    if len(a)==1 and a.upper() in letters and b.replace('-','').upper() in known:
-                        continue
-                kept.append(tok)
-            return ' '.join(kept).strip()
-
-        def _after_dot(s: str) -> str:
-            s = str(s or '')
-            return s.split('. ',1)[1] if '. ' in s else s
-
-        def _find_best_image_for(row) -> Optional[str]:
-            fn = str(row.get('FILE_NAME') or '').strip()
-            if fn and fn in images_map: return fn
-            call = row.get('CALL','') or ''
-            pname = row.get('PLAY_NAME','') or ''
-            formation = str(row.get('FORMATION','') or '')
-            strength = str(row.get('STRENGTH','') or '')
-            base_from_call = _strip_motions(_after_dot(call))
-            base_from_pname = _after_dot(pname)
-            candidate_texts = []
-            for base in [base_from_call, base_from_pname]:
-                if base:
-                    candidate_texts.append(f"{formation} {base}")
-                    if strength: candidate_texts.append(f"{formation} {strength} {base}")
-                    candidate_texts.append(base)
-            if pname: candidate_texts.append(pname.replace('. ',' '))
-            from difflib import SequenceMatcher
-            keynorms = [_canon(t) for t in candidate_texts if t]
-            filenorm = {fname: _canon(Path(fname).stem) for fname in images_map.keys()}
-            best_name, best_score = None, 0.0
-            play_piece = _canon(base_from_call or base_from_pname)
-            form_piece = _canon(formation + (' ' + strength if strength else ''))
-            for fname, fstem in filenorm.items():
-                for kn in keynorms:
-                    if not kn: continue
-                    score = SequenceMatcher(None, fstem, kn).ratio()
-                    if play_piece and play_piece in fstem: score += 0.25
-                    if form_piece and form_piece in fstem: score += 0.20
-                    if play_piece and form_piece and (play_piece in fstem and form_piece in fstem): score += 0.20
-                    if kn in fstem or fstem in kn: score += 0.10
-                    if score > best_score:
-                        best_score, best_name = score, fname
-            return best_name if (best_name and best_score >= 0.55) else None
-
-        def _img_tag_for_row(row):
-            if not include_imgs or not images_map: return ''
-            fname = _find_best_image_for(row)
-            if not fname: return ''
-            b = images_map.get(fname)
-            if not b: return ''
-            mime = _guess_mime(fname)
-            b64 = base64.b64encode(b).decode('utf-8')
-            return f'<img class="thumb" src="data:{mime};base64,{b64}" />'
-
-        def _esc(s):
-            try:
-                import html as _html
-                return _html.escape('' if s is None else str(s))
-            except Exception:
-                return str(s)
-
-        parts = []
-        parts.append(f"""
-        <style>
-        @media print {{
-          @page {{ size: Letter landscape; margin: 0.35in; }}
-          body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-        }}
-        body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
-        .bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
-        .bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
-        .row {{ display:flex; align-items:center; gap:8px; padding:6px 10px; border-top:1px solid #eee; }}
-        .thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; }}
-        .main {{ font-weight:700; font-size:14px; }}
-        .meta {{ font-size:12px; color:#334155; }}
-        </style>
-        """)
-
-        for bucket, dfb in call_sheet.groupby('Bucket', sort=False):
-            parts.append(f'<div class="bucket"><div class="bktitle">{_esc(bucket)}</div>')
-            for _, r in dfb.iterrows():
-                call = _esc(r.get('CALL',''))
-                form = _esc(r.get('FORMATION','')); strn = _esc(r.get('STRENGTH',''))
-                pers = _esc(r.get('PERSONNEL',''))
-                recip = _esc(r.get('RECIPIENT_LETTER',''))
-                cov = _esc(r.get('COVERAGE_TAGS','')); press = _esc(r.get('PRESSURE_TAGS',''))
-                situ = _esc(r.get('SITUATION_TAGS',''))
-                concept = _esc(r.get('CONCEPT_TAGS',''))
-                img = _img_tag_for_row(r)
-                meta_bits = [x for x in [f"{form} {strn}".strip(), f"Pers {pers}" if pers else '', f"Recipient {recip}" if recip else '', situ] if x]
-                meta_line = ' | '.join(meta_bits)
-                tags_line = ' • '.join([x for x in [concept, cov, press] if x])
-                parts.append(f'''
-                  <div class="row">
-                    {img if img else ''}
-                    <div>
-                      <div class="main">{call}</div>
-                      <div class="meta">{_esc(meta_line)}</div>
-                      {f'<div class="meta">{_esc(tags_line)}</div>' if tags_line else ''}
-                    </div>
-                  </div>
-                ''')
-            parts.append('</div>')
-        html_str = "\n".join(parts)
-        st.components.v1.html(html_str, height=800, scrolling=True)
-        st.download_button("⬇️ Download OC_OnePager.html", data=html_str.encode('utf-8'), file_name="OC_OnePager.html", mime="text/html")
-except Exception as _e:
-    st.warning(f"One-Pager build skipped: {_e}")
