@@ -298,7 +298,7 @@ def handle_image_uploads(files):
                             skipped += 1
                             continue
                         try:
-                            buf = zf.read(zi)
+                            buf = zf.read(zi.filename)  # <- use the filename, not the ZipInfo object
                         except Exception:
                             skipped += 1
                             continue
@@ -770,41 +770,84 @@ try:
     include_imgs = st.checkbox("Include play art (from uploaded images)", True, key="onepager_imgs")
     thumb_px = st.slider("Thumbnail size (px)", 60, 140, 90, 10, key="onepager_thumb")
 
-    def _canon(s: str) -> str:
-        import re, unicodedata
-        t = unicodedata.normalize('NFKD', str(s or '')).encode('ascii','ignore').decode('ascii')
-        return re.sub(r'[^a-z0-9]+','', t.lower())
+    # ---- Robust image lookup helpers (case-insensitive, extension-agnostic) ----
+from pathlib import Path
+import re, unicodedata
 
-    def _guess_mime(name):
-        n = str(name or '').lower()
-        if n.endswith(('.jpg','.jpeg')): return 'image/jpeg'
-        if n.endswith('.webp'): return 'image/webp'
-        return 'image/png'
+def _canon(s: str) -> str:
+    # strip accents, keep only a-z0-9
+    t = unicodedata.normalize('NFKD', str(s or '')).encode('ascii', 'ignore').decode('ascii')
+    return re.sub(r'[^a-z0-9]+', '', t.lower())
 
-    def _find_image(row) -> Optional[str]:
-        fn = str(row.get('FILE_NAME') or '').strip()
-        if fn and fn in images_map:
-            return fn
-        pname = _canon(row.get('PLAY_NAME',''))
-        best, score = None, 0.0
-        for fname in images_map.keys():
-            stem = _canon(Path(fname).stem)
-            sc = 1.0 if pname and pname in stem else 0.0
-            if sc > score:
-                best, score = fname, sc
-        return best if score >= 1.0 else None
+def _norm_basename(s: str) -> str:
+    # just the file's base name, lowercase
+    return Path(str(s or '').strip()).name.lower()
 
-    def _img_tag(row):
-        if not include_imgs or not images_map:
-            return ''
-        fn = _find_image(row)
-        if not fn:
-            return ''
-        b = images_map.get(fn)
-        if not b:
-            return ''
-        b64 = base64.b64encode(b).decode('utf-8')
-        return f"<img class='thumb' src='data:{_guess_mime(fn)};base64,{b64}' />"
+def _stem_canon(s: str) -> str:
+    # canonicalized stem (no extension)
+    return _canon(Path(str(s or '')).stem)
+
+def _guess_mime(name: str) -> str:
+    n = str(name or '').lower()
+    if n.endswith(('.jpg', '.jpeg')): return 'image/jpeg'
+    if n.endswith('.webp'): return 'image/webp'
+    return 'image/png'
+
+# Build indexes once per render
+_image_by_basename: dict[str, str] = {}  # "play.png" or "play" -> stored key
+_image_by_stem: dict[str, str] = {}      # canon(stem) -> stored key
+
+if images_map:
+    for stored_key in images_map.keys():
+        base = _norm_basename(stored_key)          # e.g. "play.png"
+        stem_lower = Path(base).stem.lower()       # e.g. "play"
+        stem_c = _stem_canon(base)                 # e.g. "play"
+        # map both "play.png" and "play" to stored_key
+        _image_by_basename[base] = stored_key
+        _image_by_basename[stem_lower] = stored_key
+        # canon stem map
+        _image_by_stem[stem_c] = stored_key
+
+def _find_image(row) -> Optional[str]:
+    # 1) Prefer FILE_NAME if provided (case-insensitive; with/without extension)
+    fn_raw = str(row.get('FILE_NAME') or '').strip()
+    if fn_raw:
+        base = _norm_basename(fn_raw)                # "Play.PNG" -> "play.png"
+        if base in _image_by_basename:
+            return _image_by_basename[base]
+        # try without extension
+        stem_lower = Path(base).stem.lower()
+        if stem_lower in _image_by_basename:
+            return _image_by_basename[stem_lower]
+        # try canonical stem of whatever came in
+        cs = _stem_canon(base)
+        if cs in _image_by_stem:
+            return _image_by_stem[cs]
+
+    # 2) Fallback: match by PLAY_NAME (canonical stem equals)
+    name_c = _stem_canon(row.get('PLAY_NAME', ''))
+    if name_c in _image_by_stem:
+        return _image_by_stem[name_c]
+
+    # 3) Last resort: soft contains between canonical stems
+    if name_c:
+        for s, stored_key in _image_by_stem.items():
+            if name_c in s or s in name_c:
+                return stored_key
+
+    return None
+
+def _img_tag(row):
+    if not include_imgs or not images_map:
+        return ''
+    key = _find_image(row)
+    if not key:
+        return ''
+    b = images_map.get(key)
+    if not b:
+        return ''
+    b64 = base64.b64encode(b).decode('utf-8')
+    return f"<img class='thumb' src='data:{_guess_mime(key)};base64,{b64}' />"
 
     def _esc(x):
         import html as _html
