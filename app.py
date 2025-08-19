@@ -848,7 +848,7 @@ opp_cov["COVN"] = cov_series.astype(str).apply(_cov_norm)
 cov_dist = opp_cov["COVN"].value_counts(normalize=True).to_dict()
 
 blitz_3rd_tbl = compute_blitz_rate(opp_df[opp_df["DN"] == 3], ["DIST_BUCKET"]) if "DIST_BUCKET" in opp_df.columns and "DN" in opp_df.columns else pd.DataFrame()
-        opp_blitz3 = float(blitz_3rd_tbl["blitz_rate"].mean()) if len(blitz_3rd_tbl) else 0.0
+opp_blitz3 = float(blitz_3rd_tbl["blitz_rate"].mean()) if len(blitz_3rd_tbl) else 0.0
 
         # --- Our concept success profile (optional) ---
         concept_map = {
