@@ -341,45 +341,6 @@ def handle_image_uploads(files):
     if skipped:
         msg += f"; skipped {skipped} non-image or invalid file(s)"
     st.success(msg)
-
-# -----------------------
-# Suggestions (robust)
-# -----------------------
-_st_motion = pd.DataFrame()
-if 'motion_tbl' in locals() and isinstance(motion_tbl, pd.DataFrame):
-    _st_motion = motion_tbl
-elif 'mt' in locals() and isinstance(mt, pd.DataFrame):
-    _st_motion = mt
-
-try:
-    suggestions = (
-        build_suggestions(
-            overall if 'overall' in locals() else pd.DataFrame(columns=['PLAY_TYPE_NORM','plays']),
-            by_down if 'by_down' in locals() else pd.DataFrame(),
-            by_dist if 'by_dist' in locals() else pd.DataFrame(),
-            by_form if 'by_form' in locals() else pd.DataFrame(),
-            blitz_3rd if 'blitz_3rd' in locals() else pd.DataFrame(),
-            cov_3rd if 'cov_3rd' in locals() else pd.DataFrame(),
-            by_hash if 'by_hash' in locals() else pd.DataFrame(),
-            _st_motion,
-            sample_size if 'sample_size' in locals() else 0,
-            sr_overall if 'sr_overall' in locals() else np.nan,
-            xpl_overall if 'xpl_overall' in locals() else np.nan,
-        )
-        or []
-    )
-except Exception as e:
-    st.warning(f"Suggestions temporarily unavailable: {e}")
-    suggestions = []
-
-st.subheader("Auto-Generated Game-Plan Suggestions (Universal)")
-if suggestions:
-    for s in suggestions:
-        st.markdown(f"- {s}")
-else:
-    st.info("No suggestions generated yet.")
-
-st.markdown("### Quick Call-Sheet Buckets")
 # -----------------------
 # Session defaults
 # -----------------------
@@ -658,19 +619,42 @@ else:
     st.info("No motion data found.")
 
 # -----------------------
-# Suggestions & quick buckets
+# Suggestions (robust, after tables are computed)
 # -----------------------
-suggestions = build_suggestions(overall, by_down, by_dist, by_form, blitz_3rd, cov_3rd, by_hash, mt if len(raw) else pd.DataFrame(), sample_size, sr_overall, xpl_overall)
+_st_motion = pd.DataFrame()
+if 'motion_tbl' in locals() and isinstance(motion_tbl, pd.DataFrame):
+    _st_motion = motion_tbl
+elif 'mt' in locals() and isinstance(mt, pd.DataFrame):
+    _st_motion = mt
+
+try:
+    suggestions = (
+        build_suggestions(
+            overall if 'overall' in locals() else pd.DataFrame(columns=['PLAY_TYPE_NORM','plays']),
+            by_down if 'by_down' in locals() else pd.DataFrame(),
+            by_dist if 'by_dist' in locals() else pd.DataFrame(),
+            by_form if 'by_form' in locals() else pd.DataFrame(),
+            blitz_3rd if 'blitz_3rd' in locals() else pd.DataFrame(),
+            cov_3rd if 'cov_3rd' in locals() else pd.DataFrame(),
+            by_hash if 'by_hash' in locals() else pd.DataFrame(),
+            _st_motion,
+            sample_size if 'sample_size' in locals() else 0,
+            sr_overall if 'sr_overall' in locals() else np.nan,
+            xpl_overall if 'xpl_overall' in locals() else np.nan,
+        ) or []
+    )
+except Exception as e:
+    st.warning(f"Suggestions temporarily unavailable: {e}")
+    suggestions = []
+
 st.subheader("Auto-Generated Game-Plan Suggestions (Universal)")
-for s in suggestions: st.markdown(f"- {s}")
+if suggestions:
+    for s in suggestions:
+        st.markdown(f"- {s}")
+else:
+    st.info("No suggestions generated yet.")
 
 st.markdown("### Quick Call-Sheet Buckets (Offense — Universal)")
-st.markdown("**Vs Pressure (esp. 3rd):** " + ", ".join(OFF_PRESSURE_ANSWERS))
-st.markdown("**Vs Man (3rd):** " + ", ".join(OFF_MAN_BEATERS))
-st.markdown("**Vs Cover 3 (MOFC):** " + ", ".join(OFF_C3_BEATERS))
-st.markdown("**Vs Quarters:** " + ", ".join(OFF_C4_BEATERS))
-st.markdown("**Screen Menu:** " + ", ".join(OFF_SCREEN_FAMILY))
-st.markdown("**Run Game:** " + ", ".join(RUN_GAME))
 
 # -----------------------
 # Playbook-Only Planner
@@ -932,14 +916,24 @@ with st.expander("Offense-Focused Matchup Builder (Our O vs Their D)", expanded=
             return float(score)
         lib_scored = lib.copy(); lib_scored["__SCORE__"] = lib_scored.apply(_score_row, axis=1)
         def _pick_top(df: pd.DataFrame, keywords: List[str], limit: int = 6) -> pd.DataFrame:
-            def _contains(row):
-                hay = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('SITUATION_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).lower();
-                return any(k in hay for k in keywords)
-            cand = df[df.apply(_contains, axis=1)].co
-            cand = cand.sort_values("__SCORE__", ascending=False)
-            picked, used_names, used_forms = [], set(), set()
-            for _, rr in cand.iterrows():
-                name, form = rr.get('PLAY_NAME'), rr.get('FORMATION')
-                if name in used_names or form in used_forms: continue
-                picked.append(rr); used_names.add(name); used_forms.add(form)
-                if len(picked) >= limit: break
+    def _contains(row):
+        hay = (str(row.get('CONCEPT_TAGS','')) + ' '
+               + str(row.get('SITUATION_TAGS','')) + ' '
+               + str(row.get('PLAY_NAME',''))).lower()
+        return any(k in hay for k in keywords)
+
+    cand = df[df.apply(_contains, axis=1)].copy()
+    if cand.empty:
+        return pd.DataFrame(columns=df.columns)  # nothing matched
+
+    cand = cand.sort_values("__SCORE__", ascending=False)
+    picked, used_names, used_forms = [], set(), set()
+    for _, rr in cand.iterrows():
+        name, form = rr.get('PLAY_NAME'), rr.get('FORMATION')
+        if name in used_names or form in used_forms:
+            continue
+        picked.append(rr)
+        used_names.add(name); used_forms.add(form)
+        if len(picked) >= limit:
+            break
+    return pd.DataFrame(picked)
