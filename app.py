@@ -408,88 +408,134 @@ st.sidebar.download_button("Download CSV Template", data=template_csv_bytes(), f
 # Playbook Library & Google Sheets
 # -----------------------
 st.subheader("Playbook Library — Upload once, reuse forever")
-col_pb1, col_pb2 = st.columns([2,1])
+col_pb1, col_pb2 = st.columns([2, 1])
+
 with col_pb1:
     st.markdown("**A) Load or build your library**")
+
+    # Load playbook.json (includes plays, images (base64), sheet URLs, favorites)
     pb_json = st.file_uploader("Load playbook.json (optional)", type=["json"], key="pbjson")
     if pb_json:
         try:
-            st.session_state.PLAYBOOK = deserialize_playbook(json.loads(pb_json.read().decode('utf-8')))
+            data = json.loads(pb_json.read().decode("utf-8"))
+            st.session_state.PLAYBOOK = deserialize_playbook(data)
             st.success(f"Loaded {len(st.session_state.PLAYBOOK.get('plays', []))} plays from your library.")
         except Exception as e:
             st.error(f"Couldn't load playbook.json: {e}")
 
+    # Image uploads (PNG/JPG/WEBP or ZIP)
     st.markdown("**Upload play images** (PNG/JPG/WEBP or ZIP). Name files to match FILE_NAME in your index, or exactly the PLAY_NAME.")
-    uploads = st.file_uploader("Add play screenshots/diagrams (PNG/JPG/WEBP or .zip)", type=["png","jpg","jpeg","webp","zip"], accept_multiple_files=True, key="pbimgs")
+    uploads = st.file_uploader(
+        "Add play screenshots/diagrams (PNG/JPG/WEBP or .zip)",
+        type=["png", "jpg", "jpeg", "webp", "zip"],
+        accept_multiple_files=True,
+        key="pbimgs",
+    )
     if uploads:
         handle_image_uploads(uploads)
-    # Quick sanity check so you can confirm images were stored
-if st.session_state.PLAYBOOK.get('images'):
-    st.caption(f"Library images: {len(st.session_state.PLAYBOOK['images'])}")
 
-# ⭐ Favorites UI (persisted in playbook.json)
-with st.expander("⭐ Favorites (persisted)", expanded=False):
-    lib_names = [p.get('PLAY_NAME','') for p in st.session_state.PLAYBOOK.get('plays',[])]
-    current = sorted(st.session_state.get('FAVORITES', set()))
-    picked = st.multiselect("Mark favorite plays", options=lib_names, default=current)
-    st.session_state.FAVORITES = set(picked)
+    # Quick sanity check: how many images are in-memory
+    if st.session_state.PLAYBOOK.get("images"):
+        st.caption(f"Library images: {len(st.session_state.PLAYBOOK['images'])}")
 
-st.download_button("Download Play Index CSV Template", data=play_index_template_bytes(), file_name="play_index_template.csv", mime="text/csv")
-    play_index_csv = st.file_uploader("Upload play_index.csv (" + ", ".join(PLAYBOOK_COLS) + ")", type=["csv"], key="pbidx")
+    # ⭐ Favorites UI (persisted in playbook.json)
+    with st.expander("⭐ Favorites (persisted in playbook.json)", expanded=False):
+        lib_names = [p.get("PLAY_NAME", "") for p in st.session_state.PLAYBOOK.get("plays", [])]
+        current = sorted(st.session_state.get("FAVORITES", set()))
+        picked = st.multiselect("Mark favorite plays", options=lib_names, default=current)
+        st.session_state.FAVORITES = set(picked)
+
+    # CSV template + play_index.csv upload
+    st.download_button(
+        "Download Play Index CSV Template",
+        data=play_index_template_bytes(),
+        file_name="play_index_template.csv",
+        mime="text/csv",
+    )
+
+    play_index_csv = st.file_uploader(
+        "Upload play_index.csv (" + ", ".join(PLAYBOOK_COLS) + ")",
+        type=["csv"],
+        key="pbidx",
+    )
     if play_index_csv:
         try:
             df_idx = pd.read_csv(play_index_csv)
             miss = [c for c in PLAYBOOK_COLS if c not in df_idx.columns]
-            if miss: st.error("Missing columns: " + ", ".join(miss))
+            if miss:
+                st.error("Missing columns: " + ", ".join(miss))
             else:
-                st.session_state.PLAYBOOK['plays'] = df_idx.to_dict(orient='records')
+                st.session_state.PLAYBOOK["plays"] = df_idx.to_dict(orient="records")
                 st.success(f"Indexed {len(df_idx)} plays.")
         except Exception as e:
             st.error(f"Could not read play_index.csv: {e}")
 
+    # Save playbook.json (includes images as base64 & favorites)
     st.markdown("**Save your playbook** (download a .json to reuse later)")
-    st.download_button("⬇️ Save Playbook Library (playbook.json)", data=json.dumps(serialize_playbook(st.session_state.PLAYBOOK)).encode('utf-8'), file_name="playbook.json", mime="application/json")
+    pb_bytes = json.dumps(serialize_playbook(st.session_state.PLAYBOOK)).encode("utf-8")
+    st.download_button(
+        "⬇️ Save Playbook Library (playbook.json)",
+        data=pb_bytes,
+        file_name="playbook.json",
+        mime="application/json",
+    )
 
 with col_pb2:
     st.markdown("**B) Google Sheets Sync (optional)**")
-    st.caption("No installs. Use a Google Sheet as your play index. 'Publish to web' → paste CSV link below.")
-    sheets_url = st.text_input("Google Sheets — Published CSV URL (read-only)", value=st.session_state.get('SHEETS_CSV_URL',''), placeholder="https://docs.google.com/...output=csv")
+    st.caption("Use a Google Sheet as your play index. In Sheets: File → Share → Publish to the web → CSV, then paste the link below.")
+
+    # Read-only CSV URL
+    sheets_url = st.text_input(
+        "Google Sheets — Published CSV URL (read-only)",
+        value=st.session_state.get("SHEETS_CSV_URL", ""),
+        placeholder="https://docs.google.com/...output=csv",
+        key="sheets_csv_url",
+    )
     if st.button("Load from Google Sheets"):
         try:
             df_idx = pd.read_csv(sheets_url)
             miss = [c for c in PLAYBOOK_COLS if c not in df_idx.columns]
-            if miss: st.error("Your sheet is missing columns: " + ", ".join(miss))
+            if miss:
+                st.error("Your sheet is missing columns: " + ", ".join(miss))
             else:
-                st.session_state.PLAYBOOK['plays'] = df_idx.to_dict(orient='records')
+                st.session_state.PLAYBOOK["plays"] = df_idx.to_dict(orient="records")
                 st.session_state.SHEETS_CSV_URL = sheets_url
                 st.success(f"Loaded {len(df_idx)} plays from Google Sheets.")
         except Exception as e:
             st.error(f"Couldn't load Google Sheets CSV: {e}")
-    writer_url = st.text_input("Google Apps Script Web App URL (optional)", value=st.session_state.get('SHEETS_WRITE_URL',''), placeholder="https://script.google.com/.../exec")
+
+    # Optional writer (Apps Script web app)
+    writer_url = st.text_input(
+        "Google Apps Script Web App URL (for Save → Sheets, optional)",
+        value=st.session_state.get("SHEETS_WRITE_URL", ""),
+        placeholder="https://script.google.com/macros/s/AKfycb.../exec",
+        key="sheets_write_url",
+    )
     if st.button("Push library to Google Sheets"):
         try:
-            resp = push_playbook_to_webhook(writer_url, st.session_state.PLAYBOOK.get('plays', []))
+            resp = push_playbook_to_webhook(writer_url, st.session_state.PLAYBOOK.get("plays", []))
             st.session_state.SHEETS_WRITE_URL = writer_url
             st.success("Pushed to Google Sheets. Response: " + str(resp)[:200])
         except Exception as e:
             st.error(f"Push failed: {e}")
 
+    # Quick Add (single play)
     st.markdown("**Quick Add (single play)**")
     with st.form("quick_add_play"):
-        vals = {
-            'PLAY_NAME': st.text_input("Play Name"),
-            'PERSONNEL': st.text_input("Personnel (e.g., 11, 12, 20)"),
-            'FORMATION': st.text_input("Formation (e.g., Trips, Bunch, Singleback)"),
-            'STRENGTH': st.text_input("Strength (Right/Left/Boundary/Field)"),
-            'CONCEPT_TAGS': st.text_input("Concept tags (comma-separated: Flood, Mesh, Curl-Flat, PA, Boot, RPO, IZ, OZ, Power, Counter)"),
-            'SITUATION_TAGS': st.text_input("Situation tags (3rd&7-10, 1st&10, RZ, 2-minute, vs Nickel)"),
-            'COVERAGE_TAGS': st.text_input("Coverage tags (vs Man, vs C3, vs Quarters)"),
-            'PRESSURE_TAGS': st.text_input("Pressure tags (vs Blitz, vs 5-man, vs DB blitz)"),
-            'FILE_NAME': st.text_input("Image file name (must match an uploaded image)")
+        qa = {
+            "PLAY_NAME":     st.text_input("Play Name"),
+            "PERSONNEL":     st.text_input("Personnel (e.g., 11, 12, 20)"),
+            "FORMATION":     st.text_input("Formation (e.g., Trips, Bunch, Singleback)"),
+            "STRENGTH":      st.text_input("Strength (Right/Left/Boundary/Field)"),
+            "CONCEPT_TAGS":  st.text_input("Concept tags (comma-separated: Flood, Mesh, Curl-Flat, PA, Boot, RPO, IZ, OZ, Power, Counter)"),
+            "SITUATION_TAGS":st.text_input("Situation tags (3rd&7-10, 1st&10, RZ, 2-minute, vs Nickel)"),
+            "COVERAGE_TAGS": st.text_input("Coverage tags (vs Man, vs C3, vs Quarters)"),
+            "PRESSURE_TAGS": st.text_input("Pressure tags (vs Blitz, vs 5-man, vs DB blitz)"),
+            "FILE_NAME":     st.text_input("Image file name (must match an uploaded image)"),
         }
         if st.form_submit_button("Add Play"):
-            st.session_state.PLAYBOOK['plays'].append(vals)
-            st.success(f"Added play: {vals['PLAY_NAME']}")
+            st.session_state.PLAYBOOK.setdefault("plays", []).append(qa)
+            st.success(f"Added play: {qa['PLAY_NAME']}")
 
 # -----------------------
 # Call Sheet Rules
