@@ -827,6 +827,37 @@ with st.expander("Offense-Focused Matchup Builder (Our O vs Their D)", expanded=
             try: return pd.read_csv(f)
             except Exception: return None
 
+    # ---- Clean & derive basics ----
+    def _prep_hudl(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None:
+            return pd.DataFrame()
+        df = df.copy()
+        # coerce numerics
+        for c in ["DN", "DIST", "GN_LS"]:
+            df[c] = pd.to_numeric(df.get(c), errors="coerce")
+        # distance buckets (used for 3rd-down blitz)
+        def _to_bucket(d):
+            try:
+                d = int(float(d))
+            except Exception:
+                return "unknown"
+            if d <= 3: return "short (1-3)"
+            if d <= 6: return "medium (4-6)"
+            if d <= 10: return "long (7-10)"
+            return "very long (11+)"
+        if "DIST" in df.columns and "DIST_BUCKET" not in df.columns:
+            df["DIST_BUCKET"] = df["DIST"].apply(_to_bucket)
+        # success
+        def _succ(r):
+            dn, dist, g = r.get("DN"), r.get("DIST"), r.get("GN_LS")
+            if pd.isna(dn) or pd.isna(dist) or pd.isna(g): return np.nan
+            try: dn=int(dn); dist=float(dist); g=float(g)
+            except Exception: return np.nan
+            return (g >= 0.5*dist) if dn==1 else ((g >= 0.7*dist) if dn==2 else (g >= dist))
+        if "SUCCESS" not in df.columns:
+            df["SUCCESS"] = df.apply(_succ, axis=1)
+        return df
+
     opp_df = _prep_hudl(_load_file(opp_file))
     off_df = _prep_hudl(_load_file(off_file))
 
@@ -840,38 +871,40 @@ with st.expander("Offense-Focused Matchup Builder (Our O vs Their D)", expanded=
             if any(k in s for k in ["COVER 4", "C4", "QUARTERS"]): return "C4"
             if any(k in s for k in ["COVER 2", "C2", "TWO"]): return "C2"
             return "UNK"
+        opp_cov = opp_df.copy()
+        # robust to missing COVERAGE column -> ensure a Series exists
+        cov_series = opp_cov.get("COVERAGE", pd.Series(index=opp_cov.index, dtype=object))
+        opp_cov["COVN"] = cov_series.astype(str).apply(_cov_norm)
+        cov_dist = opp_cov["COVN"].value_counts(normalize=True).to_dict()
 
-opp_cov = opp_df.copy()
-# robust to missing COVERAGE column
-cov_series = opp_cov.get("COVERAGE", pd.Series(index=opp_cov.index, dtype=object))
-opp_cov["COVN"] = cov_series.astype(str).apply(_cov_norm)
-cov_dist = opp_cov["COVN"].value_counts(normalize=True).to_dict()
-
-blitz_3rd_tbl = compute_blitz_rate(opp_df[opp_df["DN"] == 3], ["DIST_BUCKET"]) if "DIST_BUCKET" in opp_df.columns and "DN" in opp_df.columns else pd.DataFrame()
-opp_blitz3 = float(blitz_3rd_tbl["blitz_rate"].mean()) if len(blitz_3rd_tbl) else 0.0
+        blitz_3rd_tbl = compute_blitz_rate(
+            opp_df[opp_df["DN"] == 3],
+            ["DIST_BUCKET"]
+        ) if ("DIST_BUCKET" in opp_df.columns and "DN" in opp_df.columns) else pd.DataFrame()
+        opp_blitz3 = float(blitz_3rd_tbl["blitz_rate"].mean()) if len(blitz_3rd_tbl) else 0.0
 
         # --- Our concept success profile (optional) ---
-concept_map = {
+        concept_map = {
             "mesh":["mesh"], "smash":["smash"], "flood":["flood","sail"], "dagger":["dagger"],
             "curlflat":["curl flat","curl-flat","curl","flat"], "screen":["screen","bubble","tunnel"],
             "iz":["inside zone","iz"], "oz":["outside zone","oz","stretch"], "power":["power"], "counter":["counter"],
             "wheel":["wheel"], "hitch":["hitch"], "arrow":["arrow"], "stick":["stick","snag"],
         }
-def _infer_concepts(txt: str) -> list[str]:
+        def _infer_concepts(txt: str) -> list[str]:
             t = str(txt or '').lower()
             hits = [k for k, kws in concept_map.items() if any(kw in t for kw in kws)]
             return hits or ["other"]
 
-if off_df is not None and not off_df.empty:
+        if off_df is not None and not off_df.empty:
             txtcol = off_df.get("OFF_PLAY") if "OFF_PLAY" in off_df.columns else off_df.get("PLAY_TYPE", pd.Series(dtype=str))
             tmp = pd.DataFrame({"concepts": txtcol.apply(_infer_concepts), "SUCCESS": off_df.get("SUCCESS")})
             tmp = tmp.explode("concepts")
             concept_success = tmp.groupby("concepts")["SUCCESS"].mean().to_dict()
-else:
+        else:
             concept_success = {}
 
         # --- Score each library play by matchup fit ---
-def _score_row(r: pd.Series) -> float:
+        def _score_row(r: pd.Series) -> float:
             score = 0.0
             cov_tags = str(r.get('COVERAGE_TAGS','')).lower()
             if 'vs man' in cov_tags: score += 1.2 * cov_dist.get('MAN', 0)
@@ -886,10 +919,10 @@ def _score_row(r: pd.Series) -> float:
                 score += float(np.mean([concept_success.get(k, 0.5) for k in hits]))  # default neutral 0.5
             return float(score)
 
-lib_scored = lib.copy()
-lib_scored["__SCORE__"] = lib_scored.apply(_score_row, axis=1)
+        lib_scored = lib.copy()
+        lib_scored["__SCORE__"] = lib_scored.apply(_score_row, axis=1)
 
-def _pick_top(df: pd.DataFrame, keywords: list[str], limit: int = 6) -> pd.DataFrame:
+        def _pick_top(df: pd.DataFrame, keywords: list[str], limit: int = 6) -> pd.DataFrame:
             def _contains(row):
                 hay = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('SITUATION_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).lower()
                 return any(k in hay for k in keywords)
@@ -938,6 +971,10 @@ def _pick_top(df: pd.DataFrame, keywords: list[str], limit: int = 6) -> pd.DataF
             call_sheet = call_sheet_matchup
         else:
             st.info("No matchup picks found — add tags like 'vs Man / vs C3 / vs Quarters / vs Blitz' in your play index.")
+
+# -----------------------
+# Printable One-Pager (Call Sheet with Thumbnails)
+# -----------------------
 try:
     if 'call_sheet' in locals() and isinstance(call_sheet, pd.DataFrame) and not call_sheet.empty:
         st.subheader("Printable One-Pager")
@@ -959,7 +996,6 @@ try:
             return re.sub(r'[^a-z0-9]+', '', t)
 
         def _strip_motions(txt: str) -> str:
-            # remove tokens like "y-over", "x-yo-yo" etc.
             if not txt: return ''
             letters = set("XYHZF")
             known = {"OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YOYO","YO-YO","TIP"}
@@ -968,7 +1004,7 @@ try:
                 if '-' in tok:
                     a, b = tok.split('-', 1)
                     if len(a) == 1 and a.upper() in letters and b.replace('-', '').upper() in known:
-                        continue  # drop motion
+                        continue
                 kept.append(tok)
             return ' '.join(kept).strip()
 
@@ -1007,7 +1043,6 @@ try:
             best_name, best_score = None, 0.0
             play_piece = _canon(base_from_call or base_from_pname)
             form_piece = _canon(formation + (' ' + strength if strength else ''))
-
             for fname, fstem in filenorm.items():
                 for kn in keynorms:
                     if not kn: continue
@@ -1022,12 +1057,11 @@ try:
             return best_name if (best_name and best_score >= 0.55) else None
 
         def _img_tag_for_row(row):
-            if not images_map: return ''
-fname = _find_best_image_for(row)
-if not fname: return ''
-b = images_map.get(fname)
-if not b: return ''
-
+            if not include_imgs: return ''
+            fname = _find_best_image_for(row)
+            if not fname: return ''
+            b = images_map.get(fname)
+            if not b: return ''
             mime = _guess_mime(fname)
             b64 = base64.b64encode(b).decode('utf-8')
             return f'<img class="thumb" src="data:{mime};base64,{b64}" />'
