@@ -483,7 +483,8 @@ with col3:
     eff = []
     if not np.isnan(sr_overall): eff.append(f"Success rate: {sr_overall:.0%}")
     if not np.isnan(xpl_overall): eff.append(f"Explosive rate: {xpl_overall:.0%}")
-    if eff: st.write
+    if eff: st.write("
+".join(eff))
     else: st.info("Add GN_LS (gain/loss) to compute success & explosive rates.")
 
 st.divider()
@@ -717,3 +718,134 @@ try:
         st.subheader("Printable One-Pager")
         st.caption("Thumbnails match by FORMATION + PLAY NAME (motions ignored). Provide FILE_NAME to override.")
         include_imgs = st.checkbox("Include play art (from uploaded images)", True)
+        thumb_px = st.slider("Thumbnail size (px)", 60, 140, 90, 10)
+        images_map = st.session_state.PLAYBOOK.get('images', {})
+
+        def _guess_mime(name):
+            n = str(name or '').lower()
+            if n.endswith(('.jpg','.jpeg')): return 'image/jpeg'
+            if n.endswith('.webp'): return 'image/webp'
+            return 'image/png'
+
+        def _canon(s: str) -> str:
+            import re, unicodedata
+            t = unicodedata.normalize('NFKD', str(s or '')).encode('ascii','ignore').decode('ascii')
+            t = t.lower().replace('&','and')
+            return re.sub(r'[^a-z0-9]+','', t)
+
+        def _strip_motions(txt: str) -> str:
+            if not txt: return ''
+            letters = set("XYHZF")
+            known = {"OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YOYO","YO-YO","TIP"}
+            kept = []
+            for tok in str(txt).split():
+                if '-' in tok:
+                    a, b = tok.split('-',1)
+                    if len(a)==1 and a.upper() in letters and b.replace('-','').upper() in known:
+                        continue
+                kept.append(tok)
+            return ' '.join(kept).strip()
+
+        def _after_dot(s: str) -> str:
+            s = str(s or '')
+            return s.split('. ',1)[1] if '. ' in s else s
+
+        def _find_best_image_for(row) -> Optional[str]:
+            fn = str(row.get('FILE_NAME') or '').strip()
+            if fn and fn in images_map: return fn
+            call = row.get('CALL','') or ''
+            pname = row.get('PLAY_NAME','') or ''
+            formation = str(row.get('FORMATION','') or '')
+            strength = str(row.get('STRENGTH','') or '')
+            base_from_call = _strip_motions(_after_dot(call))
+            base_from_pname = _after_dot(pname)
+            candidate_texts = []
+            for base in [base_from_call, base_from_pname]:
+                if base:
+                    candidate_texts.append(f"{formation} {base}")
+                    if strength: candidate_texts.append(f"{formation} {strength} {base}")
+                    candidate_texts.append(base)
+            if pname: candidate_texts.append(pname.replace('. ',' '))
+            from difflib import SequenceMatcher
+            keynorms = [_canon(t) for t in candidate_texts if t]
+            filenorm = {fname: _canon(Path(fname).stem) for fname in images_map.keys()}
+            best_name, best_score = None, 0.0
+            play_piece = _canon(base_from_call or base_from_pname)
+            form_piece = _canon(formation + (' ' + strength if strength else ''))
+            for fname, fstem in filenorm.items():
+                for kn in keynorms:
+                    if not kn: continue
+                    score = SequenceMatcher(None, fstem, kn).ratio()
+                    if play_piece and play_piece in fstem: score += 0.25
+                    if form_piece and form_piece in fstem: score += 0.20
+                    if play_piece and form_piece and (play_piece in fstem and form_piece in fstem): score += 0.20
+                    if kn in fstem or fstem in kn: score += 0.10
+                    if score > best_score:
+                        best_score, best_name = score, fname
+            return best_name if (best_name and best_score >= 0.55) else None
+
+        def _img_tag_for_row(row):
+            if not include_imgs or not images_map: return ''
+            fname = _find_best_image_for(row)
+            if not fname: return ''
+            b = images_map.get(fname)
+            if not b: return ''
+            mime = _guess_mime(fname)
+            b64 = base64.b64encode(b).decode('utf-8')
+            return f'<img class="thumb" src="data:{mime};base64,{b64}" />'
+
+        def _esc(s):
+            try:
+                import html as _html
+                return _html.escape('' if s is None else str(s))
+            except Exception:
+                return str(s)
+
+        parts = []
+        parts.append(f"""
+        <style>
+        @media print {{
+          @page {{ size: Letter landscape; margin: 0.35in; }}
+          body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+        }}
+        body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
+        .bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
+        .bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
+        .row {{ display:flex; align-items:center; gap:8px; padding:6px 10px; border-top:1px solid #eee; }}
+        .thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; }}
+        .main {{ font-weight:700; font-size:14px; }}
+        .meta {{ font-size:12px; color:#334155; }}
+        </style>
+        """)
+
+        for bucket, dfb in call_sheet.groupby('Bucket', sort=False):
+            parts.append(f'<div class="bucket"><div class="bktitle">{_esc(bucket)}</div>')
+            for _, r in dfb.iterrows():
+                call = _esc(r.get('CALL',''))
+                form = _esc(r.get('FORMATION','')); strn = _esc(r.get('STRENGTH',''))
+                pers = _esc(r.get('PERSONNEL',''))
+                recip = _esc(r.get('RECIPIENT_LETTER',''))
+                cov = _esc(r.get('COVERAGE_TAGS','')); press = _esc(r.get('PRESSURE_TAGS',''))
+                situ = _esc(r.get('SITUATION_TAGS',''))
+                concept = _esc(r.get('CONCEPT_TAGS',''))
+                img = _img_tag_for_row(r)
+                meta_bits = [x for x in [f"{form} {strn}".strip(), f"Pers {pers}" if pers else '', f"Recipient {recip}" if recip else '', situ] if x]
+                meta_line = ' | '.join(meta_bits)
+                tags_line = ' • '.join([x for x in [concept, cov, press] if x])
+                parts.append(f'''
+                  <div class="row">
+                    {img if img else ''}
+                    <div>
+                      <div class="main">{call}</div>
+                      <div class="meta">{_esc(meta_line)}</div>
+                      {f'<div class="meta">{_esc(tags_line)}</div>' if tags_line else ''}
+                    </div>
+                  </div>
+                ''')
+            parts.append('</div>')
+        html_str = "
+".join(parts)
+        st.components.v1.html(html_str, height=800, scrolling=True)
+        st.download_button("⬇️ Download OC_OnePager.html", data=html_str.encode('utf-8'), file_name="OC_OnePager.html", mime="text/html")
+except Exception as _e:
+    st.warning(f"One-Pager build skipped: {_e}")
