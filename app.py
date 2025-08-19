@@ -72,12 +72,7 @@ OFF_C4_BEATERS = [
     "Deep over (play-action)"
 ]
 OFF_SCREEN_FAMILY = ["RB screen","WR bubble/tunnel","TE screen"]
-RUN_GAME = ["Inside Zone","Outside Zone / Stretch","Power","Counter","Iso / Lead","Trap","Pin-pull / Toss"]\n\n# --- DRY constants & helpers (reduce duplication) ---
-SCREEN_KEYS = ['TRAIN','VIPER','UNICORN','UTAH']
-BUCKETS = {
-    "1st & 10": ["1st&10","quick","inside zone","iz","outside zone","oz","power","counter","rpo","play-action","boot"],
-    "2nd & medium (4-6)": ["2nd&medium","quick","screen","draw","counter","boot","pa"],
-    "3rd & short (1-3)": ["3rd&
+RUN_GAME = ["Inside Zone","Outside Zone / Stretch","Power","Counter","Iso / Lead","Trap","Pin-pull / Toss"]\n\n
 def template_csv_bytes() -> bytes:
     df = pd.DataFrame(columns=PRIMARY_COLS)
     buf = io.StringIO()
@@ -646,10 +641,9 @@ with col3:
     if not np.isnan(sr_overall): eff_lines.append(f"Success rate: {sr_overall:.0%}")
     if not np.isnan(xpl_overall): eff_lines.append(f"Explosive rate: {xpl_overall:.0%}")
     if eff_lines:
-        st.write("
-".join(eff_lines))
-    else:
-        st.info("Add GN_LS (gain/loss) to compute success & explosive rates.")
+    st.write("\n".join(eff_lines))
+else:
+    st.info("Add GN_LS (gain/loss) to compute success & explosive rates.")
 
 st.divider()
 
