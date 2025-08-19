@@ -862,16 +862,16 @@ def _infer_concepts(txt: str) -> list[str]:
             hits = [k for k, kws in concept_map.items() if any(kw in t for kw in kws)]
             return hits or ["other"]
 
-        if off_df is not None and not off_df.empty:
+if off_df is not None and not off_df.empty:
             txtcol = off_df.get("OFF_PLAY") if "OFF_PLAY" in off_df.columns else off_df.get("PLAY_TYPE", pd.Series(dtype=str))
             tmp = pd.DataFrame({"concepts": txtcol.apply(_infer_concepts), "SUCCESS": off_df.get("SUCCESS")})
             tmp = tmp.explode("concepts")
             concept_success = tmp.groupby("concepts")["SUCCESS"].mean().to_dict()
-        else:
+else:
             concept_success = {}
 
         # --- Score each library play by matchup fit ---
-        def _score_row(r: pd.Series) -> float:
+def _score_row(r: pd.Series) -> float:
             score = 0.0
             cov_tags = str(r.get('COVERAGE_TAGS','')).lower()
             if 'vs man' in cov_tags: score += 1.2 * cov_dist.get('MAN', 0)
