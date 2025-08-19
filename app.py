@@ -483,8 +483,7 @@ with col3:
     eff = []
     if not np.isnan(sr_overall): eff.append(f"Success rate: {sr_overall:.0%}")
     if not np.isnan(xpl_overall): eff.append(f"Explosive rate: {xpl_overall:.0%}")
-    if eff: st.write("
-".join(eff))
+    if eff: st.write("\n".join(eff))
     else: st.info("Add GN_LS (gain/loss) to compute success & explosive rates.")
 
 st.divider()
@@ -675,7 +674,9 @@ with st.expander("Offense-Focused Matchup Builder (Our O vs Their D)", expanded=
             def _contains(row):
                 hay = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('SITUATION_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).lower();
                 return any(k in hay for k in keywords)
-            cand = df[df.apply(_contains, axis=1)].copy() or df.copy()
+            cand = df[df.apply(_contains, axis=1)].copy()
+if cand.empty:
+    cand = df.copy()
             cand = cand.sort_values("__SCORE__", ascending=False)
             picked, used_names, used_forms = [], set(), set()
             for _, rr in cand.iterrows():
@@ -843,8 +844,7 @@ try:
                   </div>
                 ''')
             parts.append('</div>')
-        html_str = "
-".join(parts)
+        html_str = "\n".join(parts)
         st.components.v1.html(html_str, height=800, scrolling=True)
         st.download_button("⬇️ Download OC_OnePager.html", data=html_str.encode('utf-8'), file_name="OC_OnePager.html", mime="text/html")
 except Exception as _e:
