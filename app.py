@@ -887,7 +887,7 @@ def _score_row(r: pd.Series) -> float:
             return float(score)
 
 lib_scored = lib.copy()
-        lib_scored["__SCORE__"] = lib_scored.apply(_score_row, axis=1)
+lib_scored["__SCORE__"] = lib_scored.apply(_score_row, axis=1)
 
         def _pick_top(df: pd.DataFrame, keywords: list[str], limit: int = 6) -> pd.DataFrame:
             def _contains(row):
