@@ -857,7 +857,7 @@ concept_map = {
             "iz":["inside zone","iz"], "oz":["outside zone","oz","stretch"], "power":["power"], "counter":["counter"],
             "wheel":["wheel"], "hitch":["hitch"], "arrow":["arrow"], "stick":["stick","snag"],
         }
-     def _infer_concepts(txt: str) -> list[str]:
+def _infer_concepts(txt: str) -> list[str]:
             t = str(txt or '').lower()
             hits = [k for k, kws in concept_map.items() if any(kw in t for kw in kws)]
             return hits or ["other"]
