@@ -852,10 +852,10 @@ opp_blitz3 = float(blitz_3rd_tbl["blitz_rate"].mean()) if len(blitz_3rd_tbl) els
 
         # --- Our concept success profile (optional) ---
         concept_map = {
-            "mesh":["mesh"], "smash":["smash"], "flood":["flood","sail"], "dagger":["dagger"],
-            "curlflat":["curl flat","curl-flat","curl","flat"], "screen":["screen","bubble","tunnel"],
-            "iz":["inside zone","iz"], "oz":["outside zone","oz","stretch"], "power":["power"], "counter":["counter"],
-            "wheel":["wheel"], "hitch":["hitch"], "arrow":["arrow"], "stick":["stick","snag"],
+        "mesh":["mesh"], "smash":["smash"], "flood":["flood","sail"], "dagger":["dagger"],
+        "curlflat":["curl flat","curl-flat","curl","flat"], "screen":["screen","bubble","tunnel"],
+        "iz":["inside zone","iz"], "oz":["outside zone","oz","stretch"], "power":["power"], "counter":["counter"],
+        "wheel":["wheel"], "hitch":["hitch"], "arrow":["arrow"], "stick":["stick","snag"],
         }
         def _infer_concepts(txt: str) -> list[str]:
             t = str(txt or '').lower()
