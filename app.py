@@ -227,20 +227,21 @@ def ui_table(title: str, df: pd.DataFrame, chart: bool=False, pivot=None):
 def handle_image_uploads(files):
     if not files:
         return
-    added = added_from_zip = skipped = dup = 0
     images = st.session_state.PLAYBOOK.setdefault('images', {})
     exts = {'.png', '.jpg', '.jpeg', '.webp'}
 
+    added = added_from_zip = skipped = dup = 0
+
     for f in files:
-        fname = f.name
-        if fname.lower().endswith('.zip'):
+        name = f.name
+        if name.lower().endswith('.zip'):
             try:
-                data = f.read()  # read once
+                data = f.read()
                 with zipfile.ZipFile(io.BytesIO(data)) as zf:
                     for zi in zf.infolist():
+                        # skip directories & macOS resource files
                         if zi.is_dir():
                             continue
-                        # skip macOS resource files and folders
                         if zi.filename.startswith('__MACOSX/') or Path(zi.filename).name.startswith('._'):
                             continue
                         ext = Path(zi.filename).suffix.lower()
@@ -248,46 +249,43 @@ def handle_image_uploads(files):
                             skipped += 1
                             continue
                         try:
-                            buf = zf.read(zi)
+                            buf = zf.read(zi.filename)  # use filename here
                         except Exception:
                             skipped += 1
                             continue
 
-                        base = Path(zi.filename).name   # drop subfolder
+                        base = Path(zi.filename).name
                         stem = Path(base).stem
                         key = base
                         idx = 1
-                        # de-duplicate so we don't overwrite if two files share the same basename
-                        while key in images:
+                        while key in images:  # de-dup so we don't overwrite
                             dup += 1
                             key = f"{stem}_{idx}{ext}"
                             idx += 1
-
                         images[key] = buf
                         added += 1
                         added_from_zip += 1
             except Exception as e:
-                st.error(f"Couldn't read zip '{fname}': {e}")
+                st.error(f"Couldn't read zip '{name}': {e}")
         else:
-            try:
-                ext = Path(fname).suffix.lower()
-                if ext in exts:
-                    base = Path(fname).name
-                    stem = Path(base).stem
-                    key = base
-                    idx = 1
-                    while key in images:
-                        dup += 1
-                        key = f"{stem}_{idx}{ext}"
-                        idx += 1
-                    images[key] = f.read()
-                    added += 1
-                else:
-                    skipped += 1
-            except Exception:
+            ext = Path(name).suffix.lower()
+            if ext in exts:
+                base = Path(name).name
+                stem = Path(base).stem
+                key = base
+                idx = 1
+                while key in images:
+                    dup += 1
+                    key = f"{stem}_{idx}{ext}"
+                    idx += 1
+                images[key] = f.read()
+                added += 1
+            else:
                 skipped += 1
 
-    msg = f"Stored {added} image(s)" + (f" ({added_from_zip} from zip)" if added_from_zip else '')
+    msg = f"Stored {added} image(s)"
+    if added_from_zip:
+        msg += f" ({added_from_zip} from zip)"
     if dup:
         msg += f"; handled {dup} duplicate name(s)"
     if skipped:
@@ -434,16 +432,21 @@ with col_pb1:
             st.error(f"Couldn't load playbook.json: {e}")
 
     st.markdown("**Upload play images** (PNG/JPG/WEBP or ZIP). Name files to match FILE_NAME in your index, or exactly the PLAY_NAME.")
-    uploads = st.file_uploader(..., accept_multiple_files=True, key="pbimgs")
+    uploads = st.file_uploader(
+    "Add play screenshots/diagrams (PNG/JPG/WEBP or .zip)",
+    type=["png","jpg","jpeg","webp","zip"],
+    accept_multiple_files=True,
+    key="pbimgs",
+)
     if uploads:
         handle_image_uploads(uploads)
 
-    # sanity check / quick preview
+    # Quick sanity check / preview so you can confirm images were stored
     if st.session_state.PLAYBOOK.get('images'):
         st.caption(f"Library images: {len(st.session_state.PLAYBOOK['images'])}")
         if st.checkbox("Preview first 8 images", value=False, key="img_preview"):
             keys = list(st.session_state.PLAYBOOK['images'].keys())[:8]
-            cols = st.columns(len(keys) or 1)
+            cols = st.columns(max(1, len(keys)))
             for i, k in enumerate(keys):
                 with cols[i]:
                     st.caption(k)
