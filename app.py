@@ -209,11 +209,6 @@ def serialize_playbook(pb: dict) -> dict:
         'images': {},
         'sheets_csv_url': st.session_state.get('SHEETS_CSV_URL', ''),
         'sheets_write_url': st.session_state.get('SHEETS_WRITE_URL', ''),
-        # persist motion settings
-        'motion_types': st.session_state.get('MOTION_TYPES', []),
-        'motion_letters': st.session_state.get('MOTION_LETTERS', []),
-        'motion_pct': st.session_state.get('MOTION_PCT', 100),
-        'include_motion': st.session_state.get('INCLUDE_MOTION', True),
     }
     for fname, b in pb.get('images', {}).items():
         try:
@@ -230,16 +225,10 @@ def deserialize_playbook(pb_json: dict) -> dict:
             pb['images'][fname] = base64.b64decode(s.encode('utf-8'))
         except Exception:
             pass
-    # restore sheet URLs
+    # restore sheet URLs only (no motion settings persisted)
     st.session_state['SHEETS_CSV_URL'] = pb_json.get('sheets_csv_url', '')
     st.session_state['SHEETS_WRITE_URL'] = pb_json.get('sheets_write_url', '')
-    # restore motion settings
-    st.session_state['MOTION_TYPES'] = pb_json.get('motion_types', st.session_state.get('MOTION_TYPES', []))
-    st.session_state['MOTION_LETTERS'] = pb_json.get('motion_letters', st.session_state.get('MOTION_LETTERS', []))
-    st.session_state['MOTION_PCT'] = pb_json.get('motion_pct', st.session_state.get('MOTION_PCT', 100))
-    st.session_state['INCLUDE_MOTION'] = pb_json.get('include_motion', st.session_state.get('INCLUDE_MOTION', True))
     return pb
-
 
 def load_playbook_from_sheets_csv(url: str) -> pd.DataFrame:
     # expects a Google Sheets "Publish to the web" CSV URL
@@ -376,15 +365,6 @@ if 'SHEETS_CSV_URL' not in st.session_state:
     st.session_state.SHEETS_CSV_URL = ''
 if 'SHEETS_WRITE_URL' not in st.session_state:
     st.session_state.SHEETS_WRITE_URL = ''
-# --- Motion defaults (carry through each game) ---
-if 'MOTION_TYPES' not in st.session_state:
-    st.session_state.MOTION_TYPES = ["OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YO-YO","TIP"]
-if 'MOTION_LETTERS' not in st.session_state:
-    st.session_state.MOTION_LETTERS = ["X","Y","H","Z","F"]  # F = RB
-if 'MOTION_PCT' not in st.session_state:
-    st.session_state.MOTION_PCT = 100  # % of calls that include motion
-if 'INCLUDE_MOTION' not in st.session_state:
-    st.session_state.INCLUDE_MOTION = True
 # --- Formation & screen defaults ---
 if 'CONCEPT_FORMATION_RULES' not in st.session_state:
     # Default based on your note: TRAIN only out of TRIPS (not BUNCH)
@@ -394,8 +374,6 @@ if 'CONCEPT_FORMATION_RULES' not in st.session_state:
     }
 if 'SCREEN_RECIPIENT_ORDER' not in st.session_state:
     st.session_state.SCREEN_RECIPIENT_ORDER = ['Y','Z','H','X','F']
-if 'TIE_MOTION_TO_RECIPIENT' not in st.session_state:
-    st.session_state.TIE_MOTION_TO_RECIPIENT = True
 
 col_pb1, col_pb2 = st.columns([2,1])
 with col_pb1:
@@ -489,32 +467,6 @@ with col_pb2:
             st.success(f"Added play: {qa_name}")
 
 # -----------------------
-# Motion Settings (carry through each game)
-# -----------------------
-with st.expander("Motion Settings (carry through each game)"):
-    st.session_state.INCLUDE_MOTION = st.checkbox(
-        "Include motion in generated calls",
-        value=st.session_state.get('INCLUDE_MOTION', True)
-    )
-    st.session_state.MOTION_TYPES = st.multiselect(
-        "Motion types",
-        options=["OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YO-YO","TIP"],
-        default=st.session_state.get('MOTION_TYPES', [])
-    )
-    st.session_state.MOTION_LETTERS = st.multiselect(
-        "Motion letters (X,Y,H,Z,F)",
-        options=["X","Y","H","Z","F"],
-        default=st.session_state.get('MOTION_LETTERS', ["X","Y","H","Z","F"])
-    )
-    st.session_state.MOTION_PCT = st.slider(
-        "% of calls that include motion",
-        min_value=0, max_value=100,
-        value=int(st.session_state.get('MOTION_PCT', 100)),
-        step=5
-    )
-    st.caption("F = RB. Motions will be inserted as <Letter>-<Type> (e.g., H-FLY, X-OVER) before the play name in the final CALL column.")
-
-# -----------------------
 # Call Sheet Rules (formations & screens)
 # -----------------------
 with st.expander("Call Sheet Rules (formations & screens)"):
@@ -540,7 +492,6 @@ with st.expander("Call Sheet Rules (formations & screens)"):
             st.session_state.SCREEN_RECIPIENT_ORDER = parsed
     except Exception:
         pass
-    st.session_state.TIE_MOTION_TO_RECIPIENT = st.checkbox("Tie motion letter to the screen recipient (e.g., y-yo-yo y-train)", value=st.session_state.get('TIE_MOTION_TO_RECIPIENT', True))
 
 # -----------------------
 # File upload (optional)
@@ -815,35 +766,8 @@ else:
             call_rows.append(picked)
     if call_rows:
         call_sheet = pd.concat(call_rows, ignore_index=True)
-        # --- Apply motion to calls, if enabled ---
-        include = st.session_state.get('INCLUDE_MOTION', True)
-        letters = [s.upper() for s in st.session_state.get('MOTION_LETTERS', [])]
-        types = [s.upper() for s in st.session_state.get('MOTION_TYPES', [])]
-        pct = int(st.session_state.get('MOTION_PCT', 100))
 
-        call_sheet = call_sheet.copy()
-        call_sheet["MOTION_LETTER"] = ""
-        call_sheet["MOTION_TYPE"] = ""
-        call_sheet["CALL"] = call_sheet["PLAY_NAME"]
-
-        if include and letters and types and pct > 0:
-            n = len(call_sheet)
-            k = max(1, round(n * pct / 100))
-            for i in range(k):
-                idx = i % n
-                L = letters[i % len(letters)]
-                T = types[i % len(types)]
-                base = str(call_sheet.at[idx, "PLAY_NAME"]) or ""
-                if ". " in base:
-                    prefix, rest = base.split(". ", 1)
-                    new_call = f"{prefix}. {L}-{T} {rest}"
-                else:
-                    new_call = f"{L}-{T} {base}"
-                call_sheet.at[idx, "MOTION_LETTER"] = L
-                call_sheet.at[idx, "MOTION_TYPE"] = T
-                call_sheet.at[idx, "CALL"] = new_call
-
-        # --- Screen recipient labeling & call rewrite for screens ---
+        # Detect screen-like concepts
         def _screen_concept(row: pd.Series) -> str | None:
             txt = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).upper()
             for key in ['TRAIN','VIPER','UNICORN','UTAH']:
@@ -853,28 +777,31 @@ else:
                 return 'SCREEN'
             return None
 
+        # Recipient order for screens (no motions)
         order = st.session_state.get('SCREEN_RECIPIENT_ORDER', ['Y','Z','H','X','F'])
-        tie_motion = st.session_state.get('TIE_MOTION_TO_RECIPIENT', True)
+
+        call_sheet = call_sheet.copy()
+        call_sheet["RECIPIENT_LETTER"] = ""
+
+        # Base CALL (no motions): "<Formation> <Strength>. <PLAY_NAME>"
+        base_prefix = (
+            call_sheet["FORMATION"].fillna("").str.strip() + " " +
+            call_sheet["STRENGTH"].fillna("").str.strip()
+        ).str.strip()
+        call_sheet["CALL"] = base_prefix.where(base_prefix.eq(""), base_prefix + ". ") + call_sheet["PLAY_NAME"].fillna("")
+
+        # For screens, override CALL with recipient-coded version
         screen_idx = [i for i in call_sheet.index if _screen_concept(call_sheet.loc[i])]
         for j, idx in enumerate(screen_idx):
             recip = order[j % len(order)]
             concept = _screen_concept(call_sheet.loc[idx]) or 'SCREEN'
-            call_sheet.at[idx, 'RECIPIENT_LETTER'] = recip
-            # tie motion letter to recipient, if requested
-            if tie_motion:
-                call_sheet.at[idx, 'MOTION_LETTER'] = recip
-            # Rebuild CALL for screen rows: "<Formation> <Strength>. <letter-motion> <letter-concept>"
-            form = str(call_sheet.at[idx, 'FORMATION'] if 'FORMATION' in call_sheet.columns else '').strip()
-            strength = str(call_sheet.at[idx, 'STRENGTH'] if 'STRENGTH' in call_sheet.columns else '').strip()
+            form = str(call_sheet.at[idx, 'FORMATION'] or '').strip()
+            strength = str(call_sheet.at[idx, 'STRENGTH'] or '').strip()
             prefix = (form + (' ' + strength if strength else '')).strip()
-            m_letter = str(call_sheet.at[idx, 'MOTION_LETTER'] or '')
-            m_type = str(call_sheet.at[idx, 'MOTION_TYPE'] or '')
-            motion_piece = (f"{m_letter.lower()}-{m_type} " if m_letter and m_type else '')
-            screen_piece = f"{recip.lower()}-{concept.lower()}"
-            call_sheet.at[idx, 'CALL'] = (f"{prefix}. " if prefix else '') + motion_piece + screen_piece
+            call_sheet.at[idx, 'RECIPIENT_LETTER'] = recip
+            call_sheet.at[idx, 'CALL'] = (f"{prefix}. " if prefix else '') + f"{recip.lower()}-{concept.lower()}"
 
-        # Show CALL first for readability if present
-        cols = ["Bucket","CALL","PLAY_NAME","MOTION_LETTER","MOTION_TYPE","RECIPIENT_LETTER",
+        cols = ["Bucket","CALL","PLAY_NAME","RECIPIENT_LETTER",
                 "PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS",
                 "COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]
         call_sheet = call_sheet[[c for c in cols if c in call_sheet.columns]]
@@ -885,7 +812,7 @@ else:
         st.info("Could not find plays matching the standard buckets. Add situation tags like '1st&10', '3rd&7-10', or concept tags (Snag, Flood, Mesh, Smash, Dagger, Screen, IZ/OZ/Power/Counter).")
 
 # -----------------------
-# Printable One-Pager (Call Sheet with Thumbnails)
+# Printable One-Pager (Call Sheet with Thumbnails) — motions removed, image column left
 # -----------------------
 try:
     if 'call_sheet' in locals() and isinstance(call_sheet, pd.DataFrame) and not call_sheet.empty:
@@ -909,95 +836,67 @@ try:
             t = t.lower().replace('&', 'and')
             return re.sub(r'[^a-z0-9]+', '', t)
 
-        def _find_best_image_for(row) -> str | None:
-            # Prefer matching by FORMATION + PLAY NAME, ignore motions in the call text.
-            # 1) Honor explicit FILE_NAME if present & found
-            fn = str(row.get('FILE_NAME') or '').strip()
-            if fn and fn in images_map:
-                return fn
+        def _strip_motions(txt: str) -> str:
+            # remove tokens like "y-over", "x-yo-yo" etc.
+            if not txt:
+                return ''
+            toks = []
+            known = {"OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YOYO","YO-YO","TIP"}
+            letters = set("XYHZF")
+            for tok in str(txt).split():
+                if '-' in tok:
+                    a, b = tok.split('-', 1)
+                    if len(a) == 1 and a.upper() in letters:
+                        if b.replace('-', '').upper() in known:
+                            continue
+                toks.append(tok)
+            return ' '.join(toks)
 
-            # helper: strip motion tokens like "Y-OVER", "x-yo-yo", etc., without regex to keep things portable
-            def _strip_motions(txt: str) -> str:
-                if not txt:
-                    return ''
-                motion_types = [t.strip().upper().replace('-', '') for t in st.session_state.get('MOTION_TYPES', ["OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YO-YO","TIP"])]
-                letters = set(list('XYHZF'))
-                out = []
-                for tok in str(txt).split():
-                    if '-' in tok:
-                        a, b = tok.split('-', 1)
-                        if len(a) == 1 and a.upper() in letters:
-                            if b.replace('-', '').upper() in motion_types:
-                                continue  # drop this motion token
-                    out.append(tok)
-                return ' '.join(out).strip()
+        from difflib import SequenceMatcher
 
-            def _after_dot(s: str) -> str:
-                s = str(s or '')
-                return s.split('. ', 1)[1] if '. ' in s else s
-
-            call = row.get('CALL', '') or ''
-            pname = row.get('PLAY_NAME', '') or ''
-            formation = str(row.get('FORMATION','') or '')
-            strength = str(row.get('STRENGTH','') or '')
-
-            base_from_call = _strip_motions(_after_dot(call))
-            base_from_pname = _after_dot(pname)
-
-            # Build candidate keys emphasizing FORMATION + PLAY NAME
-            candidate_texts = []
-            for base in [base_from_call, base_from_pname]:
-                if base:
-                    candidate_texts.append(f"{formation} {base}")
-                    if strength:
-                        candidate_texts.append(f"{formation} {strength} {base}")
-                    candidate_texts.append(base)  # fallback to play name alone
-
-            if pname:
-                candidate_texts.append(pname.replace('. ', ' '))  # e.g., "Deck Left BANJO"
-
-            keynorms = [_canon(t) for t in candidate_texts if t]
-
-            from difflib import SequenceMatcher
+        def _best_image_for(formation: str, play_name: str) -> str | None:
+            if not images_map:
+                return None
+            form = (formation or "")
+            play = (play_name or "")
+            candidates = [
+                f"{form} {play}",
+                play,
+                f"{form} {_strip_motions(play)}",
+            ]
+            keynorms = [_canon(t) for t in candidates if t]
             filenorm = {fnm: _canon(Path(fnm).stem) for fnm in images_map.keys()}
-
-            best_name, best_score = None, 0.0
-            play_piece = _canon(base_from_call or base_from_pname)
-            form_piece = _canon(formation + (' ' + strength if strength else ''))
-
+            best_fn, best_score = None, 0.0
+            form_norm = _canon(form)
+            play_norm = _canon(play)
             for fname, fstem in filenorm.items():
                 for kn in keynorms:
                     if not kn:
                         continue
                     score = SequenceMatcher(None, fstem, kn).ratio()
-                    # Boosts focused on formation+play match
-                    if play_piece and play_piece in fstem:
+                    if play_norm and play_norm in fstem:
                         score += 0.25
-                    if form_piece and form_piece in fstem:
+                    if form_norm and form_norm in fstem:
                         score += 0.20
-                    if play_piece and form_piece and (play_piece in fstem and form_piece in fstem):
-                        score += 0.20
-                    if kn in fstem or fstem in kn:
-                        score += 0.10
                     if score > best_score:
-                        best_score, best_name = score, fname
-
-            if best_name and best_score >= 0.55:
-                return best_name
+                        best_score, best_fn = score, fname
+            if best_fn and best_score >= 0.55:
+                return best_fn
             return None
 
-        def _img_tag_for_row(row):
+        def _img_tag_from_row(r):
             if not include_imgs:
-                return ''
-            fname = _find_best_image_for(row)
-            if not fname:
-                return ''
-            b = images_map.get(fname)
+                return ""
+            explicit = str(r.get('FILE_NAME') or '').strip()
+            fn = explicit or _best_image_for(r.get('FORMATION',''), r.get('PLAY_NAME',''))
+            if not fn:
+                return ""
+            b = images_map.get(fn)
             if not b:
-                return ''
-            mime = _guess_mime(fname)
+                return ""
+            mime = _guess_mime(fn)
             b64 = base64.b64encode(b).decode('utf-8')
-            return f'<img class="thumb" src="data:{mime};base64,{b64}" />'
+            return f'<img class="thumb" alt="" src="data:{mime};base64,{b64}" />'
 
         def _esc(s):
             try:
@@ -1006,23 +905,32 @@ try:
             except Exception:
                 return str(s)
 
-        # Build HTML
         parts = []
         parts.append(f'''
-        <style>
-        @media print {{
-          @page {{ size: Letter landscape; margin: 0.35in; }}
-          body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-        }}
-        body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
-        .bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
-        .bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
-        .row {{ display:flex; align-items:center; gap:8px; padding:6px 10px; border-top:1px solid #eee; }}
-        .thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; }}
-        .main {{ font-weight:700; font-size:14px; }}
-        .meta {{ font-size:12px; color:#334155; }}
-        </style>
-        ''')
+<style>
+@media print {{
+  @page {{ size: Letter landscape; margin: 0.35in; }}
+  body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+}}
+body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
+.note {{ font-size:12px; color:#475569; margin: 4px 0 10px; }}
+.bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
+.bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
+.row {{
+  display:grid;
+  grid-template-columns: {thumb_px}px 1fr;
+  align-items:center;
+  gap:12px;
+  padding:6px 10px;
+  border-top:1px solid #eee;
+}}
+.thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; background:white; }}
+.imgcell {{ width:{thumb_px}px; height:{thumb_px}px; display:flex; align-items:center; justify-content:center; }}
+.main {{ font-weight:700; font-size:14px; }}
+.meta {{ font-size:12px; color:#334155; }}
+</style>
+<div class="note">Art is matched by <b>FORMATION + PLAY NAME</b>, ignoring motion. You can override per-row by setting FILE_NAME in your play index.</div>
+''')
 
         for bucket, dfb in call_sheet.groupby('Bucket', sort=False):
             parts.append(f'<div class="bucket"><div class="bktitle">{_esc(bucket)}</div>')
@@ -1030,40 +938,33 @@ try:
                 call = _esc(r.get('CALL',''))
                 form = _esc(r.get('FORMATION','')); strn = _esc(r.get('STRENGTH',''))
                 pers = _esc(r.get('PERSONNEL',''))
-                mlet = _esc(r.get('MOTION_LETTER','')); mtype = _esc(r.get('MOTION_TYPE',''))
                 recip = _esc(r.get('RECIPIENT_LETTER',''))
                 cov = _esc(r.get('COVERAGE_TAGS','')); press = _esc(r.get('PRESSURE_TAGS',''))
                 situ = _esc(r.get('SITUATION_TAGS',''))
                 concept = _esc(r.get('CONCEPT_TAGS',''))
-                img = _img_tag_for_row(r)
-
-                motion_txt = ''
-                if (mlet or mtype):
-                    motion_txt = 'Motion ' + '-'.join([s for s in [mlet, mtype] if s])
-
                 meta_bits = [x for x in [
                     f"{form} {strn}".strip(),
                     f"Pers {pers}" if pers else '',
-                    motion_txt,
                     f"Recipient {recip}" if recip else '',
                     situ
                 ] if x]
                 meta_line = ' | '.join(meta_bits)
                 tags_line = ' • '.join([x for x in [concept, cov, press] if x])
-
+                img_html = _img_tag_from_row(r)
                 parts.append(f'''
-                 <div class="row">
-                   {img if img else ''}
-                   <div>
-                     <div class="main">{call}</div>
-                     <div class="meta">{_esc(meta_line)}</div>
-                     {f'<div class="meta">{_esc(tags_line)}</div>' if tags_line else ''}
-                   </div>
-                 </div>
-                ''')
+  <div class="row">
+    <div class="imgcell">{img_html}</div>
+    <div>
+      <div class="main">{call}</div>
+      <div class="meta">{_esc(meta_line)}</div>
+      {f'<div class="meta">{_esc(tags_line)}</div>' if tags_line else ''}
+    </div>
+  </div>
+''')
             parts.append('</div>')
-        html_str = "\n".join(parts)
 
+        html_str = "
+".join(parts)
         st.components.v1.html(html_str, height=800, scrolling=True)
         st.download_button("⬇️ Download OC_OnePager.html", data=html_str.encode('utf-8'), file_name="OC_OnePager.html", mime="text/html")
         onepager_html = html_str
@@ -1114,7 +1015,8 @@ md_lines.append("")
 md_lines.append(
     "> Map to call sheet: Pressure answers (screens/quick/hot), Man (mesh/rubs/option/BS fade), Cover 3 (Flood/Curl-Flat/Dagger), Quarters (Posts/Benders/Scissors)."
 )
-md_text = "\n".join(md_lines)
+md_text = "
+".join(md_lines)
 
 st.download_button(
     label="⬇️ Download GamePlan_Suggestions.md",
