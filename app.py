@@ -434,8 +434,20 @@ with col_pb1:
             st.error(f"Couldn't load playbook.json: {e}")
 
     st.markdown("**Upload play images** (PNG/JPG/WEBP or ZIP). Name files to match FILE_NAME in your index, or exactly the PLAY_NAME.")
-    uploads = st.file_uploader("Add play screenshots/diagrams (PNG/JPG/WEBP or .zip)", type=["png","jpg","jpeg","webp","zip"], accept_multiple_files=True, key="pbimgs")
-    if uploads: handle_image_uploads(uploads)
+    uploads = st.file_uploader(..., accept_multiple_files=True, key="pbimgs")
+    if uploads:
+        handle_image_uploads(uploads)
+
+    # sanity check / quick preview
+    if st.session_state.PLAYBOOK.get('images'):
+        st.caption(f"Library images: {len(st.session_state.PLAYBOOK['images'])}")
+        if st.checkbox("Preview first 8 images", value=False, key="img_preview"):
+            keys = list(st.session_state.PLAYBOOK['images'].keys())[:8]
+            cols = st.columns(len(keys) or 1)
+            for i, k in enumerate(keys):
+                with cols[i]:
+                    st.caption(k)
+                    st.image(st.session_state.PLAYBOOK['images'][k])
 
     st.markdown("**Index your plays with a CSV** (or add rows manually).")
     st.download_button("Download Play Index CSV Template", data=play_index_template_bytes(), file_name="play_index_template.csv", mime="text/csv")
