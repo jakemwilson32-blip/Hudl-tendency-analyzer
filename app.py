@@ -865,7 +865,7 @@ try:
                 best_key, best_score = stored_key, score
 
         # threshold: 0.55 is forgiving but avoids totally wrong picks
-        return best_key if best_score >= 0.55 else None
+        return best_key if best_score >= 0.45 else None
 
     def _find_image(row) -> Optional[str]:
         """Resolve image by (1) FILE_NAME exact-ish, (2) PLAY_NAME fuzzy."""
