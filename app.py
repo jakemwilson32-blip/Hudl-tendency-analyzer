@@ -675,8 +675,8 @@ with st.expander("Offense-Focused Matchup Builder (Our O vs Their D)", expanded=
                 hay = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('SITUATION_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).lower();
                 return any(k in hay for k in keywords)
             cand = df[df.apply(_contains, axis=1)].copy()
-if cand.empty:
-    cand = df.copy()
+            if cand.empty:
+                cand = df.copy()
             cand = cand.sort_values("__SCORE__", ascending=False)
             picked, used_names, used_forms = [], set(), set()
             for _, rr in cand.iterrows():
