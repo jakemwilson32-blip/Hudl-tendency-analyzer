@@ -915,7 +915,7 @@ with st.expander("Offense-Focused Matchup Builder (Our O vs Their D)", expanded=
             if hits: score += float(np.mean([concept_success.get(k, 0.5) for k in hits]))
             return float(score)
         lib_scored = lib.copy(); lib_scored["__SCORE__"] = lib_scored.apply(_score_row, axis=1)
-        def _pick_top(df: pd.DataFrame, keywords: List[str], limit: int = 6) -> pd.DataFrame:
+def _pick_top(df: pd.DataFrame, keywords: List[str], limit: int = 6) -> pd.DataFrame:
     def _contains(row):
         hay = (str(row.get('CONCEPT_TAGS','')) + ' '
                + str(row.get('SITUATION_TAGS','')) + ' '
