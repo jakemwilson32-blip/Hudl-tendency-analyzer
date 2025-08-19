@@ -824,42 +824,118 @@ with st.expander("Offense-Focused Matchup Builder (Our O vs Their D)", expanded=
         try:
             return pd.read_excel(f, engine="openpyxl") if f.name.lower().endswith(".xlsx") else pd.read_csv(f)
         except Exception:
-            try:
-                return pd.read_csv(f)
-            except Exception:
-                return None
+            try: return pd.read_csv(f)
+            except Exception: return None
 
-    opp_df = _load_file(opp_file)
-    off_df = _load_file(off_file)
-
-    def _prep_hudl(df: pd.DataFrame) -> pd.DataFrame:
-        if df is None: return pd.DataFrame()
-        df = df.copy()
-        for c in ["DN","DIST","GN_LS"]; df[c] = pd.to_numeric(df.get(c), errors="coerce")
-        def _succ(r):
-            dn, dist, g = r.get("DN"), r.get("DIST"), r.get("GN_LS")
-            if pd.isna(dn) or pd.isna(dist) or pd.isna(g): return np.nan
-            try: dn=int(dn); dist=float(dist); g=float(g)
-            except Exception: return np.nan
-            return (g >= 0.5*dist) if dn==1 else ((g >= 0.7*dist) if dn==2 else (g >= dist))
-        if "SUCCESS" not in df.columns: df["SUCCESS"] = df.apply(_succ, axis=1)
-        return df
-
-    opp_df = _prep_hudl(opp_df)
-    off_df = _prep_hudl(off_df)
+    opp_df = _prep_hudl(_load_file(opp_file))
+    off_df = _prep_hudl(_load_file(off_file))
 
     call_sheet_matchup = None
     if not lib.empty and not opp_df.empty:
         # --- Opponent coverage & pressure profile ---
         def _cov_norm(s: str) -> str:
             s = str(s or '').upper()
-            if any(k in s for k in ["COVER 1","C1","MAN"]): return "MAN"
-            if any(k in s for k in ["COVER 3","C3","THREE"]): return "C3"
-            if any(k in s for k in ["COVER 4","C4","QUARTERS"]): return "C4"
-            if any(k in s for k in ["COVER 2","C2","TWO"]): return "C2"
+            if any(k in s for k in ["COVER 1", "C1", "MAN"]): return "MAN"
+            if any(k in s for k in ["COVER 3", "C3", "THREE"]): return "C3"
+            if any(k in s for k in ["COVER 4", "C4", "QUARTERS"]): return "C4"
+            if any(k in s for k in ["COVER 2", "C2", "TWO"]): return "C2"
             return "UNK"
-        opp_cov = opp_df.copy(); opp_cov["COVN"] = opp_cov.get("COVERAGE","").apply(_cov_norm)
-        cov_dist = (opp_cov["COVN"].value_counts(normalize=
+
+        opp_cov = opp_df.copy()
+        opp_cov["COVN"] = opp_cov.get("COVERAGE", "").apply(_cov_norm)
+        cov_dist = opp_cov["COVN"].value_counts(normalize=True).to_dict()
+
+        blitz_3rd_tbl = compute_blitz_rate(opp_df[opp_df.get("DN")==3], ["DIST_BUCKET"]) if "DIST_BUCKET" in opp_df.columns else pd.DataFrame()
+        opp_blitz3 = float(blitz_3rd_tbl["blitz_rate"].mean()) if len(blitz_3rd_tbl) else 0.0
+
+        # --- Our concept success profile (optional) ---
+        concept_map = {
+            "mesh":["mesh"], "smash":["smash"], "flood":["flood","sail"], "dagger":["dagger"],
+            "curlflat":["curl flat","curl-flat","curl","flat"], "screen":["screen","bubble","tunnel"],
+            "iz":["inside zone","iz"], "oz":["outside zone","oz","stretch"], "power":["power"], "counter":["counter"],
+            "wheel":["wheel"], "hitch":["hitch"], "arrow":["arrow"], "stick":["stick","snag"],
+        }
+        def _infer_concepts(txt: str) -> list[str]:
+            t = str(txt or '').lower()
+            hits = [k for k, kws in concept_map.items() if any(kw in t for kw in kws)]
+            return hits or ["other"]
+
+        if off_df is not None and not off_df.empty:
+            txtcol = off_df.get("OFF_PLAY") if "OFF_PLAY" in off_df.columns else off_df.get("PLAY_TYPE", pd.Series(dtype=str))
+            tmp = pd.DataFrame({"concepts": txtcol.apply(_infer_concepts), "SUCCESS": off_df.get("SUCCESS")})
+            tmp = tmp.explode("concepts")
+            concept_success = tmp.groupby("concepts")["SUCCESS"].mean().to_dict()
+        else:
+            concept_success = {}
+
+        # --- Score each library play by matchup fit ---
+        def _score_row(r: pd.Series) -> float:
+            score = 0.0
+            cov_tags = str(r.get('COVERAGE_TAGS','')).lower()
+            if 'vs man' in cov_tags: score += 1.2 * cov_dist.get('MAN', 0)
+            if 'vs c3' in cov_tags or 'vs cover 3' in cov_tags: score += 1.2 * cov_dist.get('C3', 0)
+            if 'vs quarters' in cov_tags or 'vs c4' in cov_tags or 'vs cover 4' in cov_tags: score += 1.2 * cov_dist.get('C4', 0)
+            if 'vs cover 2' in cov_tags or 'vs c2' in cov_tags: score += 1.2 * cov_dist.get('C2', 0)
+            if opp_blitz3 >= 0.35 and 'vs blitz' in str(r.get('PRESSURE_TAGS','')).lower(): score += 0.4
+
+            cons = str(r.get('CONCEPT_TAGS','')).lower()
+            hits = [k for k, kws in concept_map.items() if any(w in cons for w in kws)]
+            if hits:
+                score += float(np.mean([concept_success.get(k, 0.5) for k in hits]))  # default neutral 0.5
+            return float(score)
+
+        lib_scored = lib.copy()
+        lib_scored["__SCORE__"] = lib_scored.apply(_score_row, axis=1)
+
+        def _pick_top(df: pd.DataFrame, keywords: list[str], limit: int = 6) -> pd.DataFrame:
+            def _contains(row):
+                hay = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('SITUATION_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).lower()
+                return any(k in hay for k in keywords)
+            cand = df[df.apply(_contains, axis=1)].copy()
+            if cand.empty:
+                cand = df.copy()
+            cand = cand.sort_values("__SCORE__", ascending=False)
+            picked, used_names, used_forms = [], set(), set()
+            for _, rr in cand.iterrows():
+                name, form = rr.get('PLAY_NAME'), rr.get('FORMATION')
+                if name in used_names or form in used_forms:
+                    continue
+                picked.append(rr); used_names.add(name); used_forms.add(form)
+                if len(picked) >= limit:
+                    break
+            return pd.DataFrame(picked)
+
+        call_rows2 = []
+        for bucket, keys in {
+            "1st & 10": ["1st&10","quick","inside zone","iz","outside zone","oz","power","counter","rpo","play-action","boot"],
+            "2nd & medium (4-6)": ["2nd&medium","quick","screen","draw","counter","boot","pa"],
+            "3rd & short (1-3)": ["3rd&1-3","hitch","slant","snag","mesh","iso","power","qb sneak"],
+            "3rd & medium (4-6)": ["3rd&4-6","snag","smash","flood","curl-flat","mesh","screen"],
+            "3rd & long (7-10)": ["3rd&7-10","dagger","flood","smash","screen","wheel"],
+            "Red Zone": ["rz","money","atm","smash","snag","fade","rub","pick"],
+            "2-minute": ["2-minute","hurry","sideline","dagger","curl-flat","out","arrow"],
+        }.items():
+            got = _pick_top(lib_scored, [k.lower() for k in keys], limit=6)
+            if not got.empty:
+                got = got[["PLAY_NAME","PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS","COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]]
+                got.insert(0, "Bucket", bucket)
+                call_rows2.append(got)
+
+        if call_rows2:
+            call_sheet_matchup = pd.concat(call_rows2, ignore_index=True)
+
+            # CALL (no motions): "<Formation> <Strength>. <PLAY_NAME>"
+            base_prefix = (call_sheet_matchup["FORMATION"].fillna("").str.strip() + " " + call_sheet_matchup["STRENGTH"].fillna("").str.strip()).str.strip()
+            call_sheet_matchup["CALL"] = base_prefix.where(base_prefix.eq(""), base_prefix + ". ") + call_sheet_matchup["PLAY_NAME"].fillna("")
+
+            st.success("Built matchup-optimized call sheet from library + opponent profile.")
+            st.dataframe(call_sheet_matchup)
+            st.download_button("⬇️ Download Call_Sheet_Matchup.csv", data=call_sheet_matchup.to_csv(index=False).encode("utf-8"), file_name="Call_Sheet_Matchup.csv", mime="text/csv")
+
+            # Make the rest of the app (one-pager/exports) use this sheet automatically
+            call_sheet = call_sheet_matchup
+        else:
+            st.info("No matchup picks found — add tags like 'vs Man / vs C3 / vs Quarters / vs Blitz' in your play index.")
 try:
     if 'call_sheet' in locals() and isinstance(call_sheet, pd.DataFrame) and not call_sheet.empty:
         st.subheader("Printable One-Pager")
@@ -870,10 +946,8 @@ try:
 
         def _guess_mime(name):
             n = str(name or '').lower()
-            if n.endswith('.jpg') or n.endswith('.jpeg'):
-                return 'image/jpeg'
-            if n.endswith('.webp'):
-                return 'image/webp'
+            if n.endswith(('.jpg','.jpeg')): return 'image/jpeg'
+            if n.endswith('.webp'): return 'image/webp'
             return 'image/png'
 
         def _canon(s: str) -> str:
@@ -884,13 +958,136 @@ try:
 
         def _strip_motions(txt: str) -> str:
             # remove tokens like "y-over", "x-yo-yo" etc.
-            if not txt:
-                return ''
-            toks = []
-            known = {"OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YOYO","YO-YO","TIP"}
+            if not txt: return ''
             letters = set("XYHZF")
+            known = {"OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YOYO","YO-YO","TIP"}
+            kept = []
             for tok in str(txt).split():
                 if '-' in tok:
                     a, b = tok.split('-', 1)
-                    if len(a) == 1 and a.upper() in letters:
-                        if b.replace('-', '').upper() in known:
+                    if len(a) == 1 and a.upper() in letters and b.replace('-', '').upper() in known:
+                        continue  # drop motion
+                kept.append(tok)
+            return ' '.join(kept).strip()
+
+        def _after_dot(s: str) -> str:
+            s = str(s or '')
+            return s.split('. ', 1)[1] if '. ' in s else s
+
+        def _find_best_image_for(row) -> str | None:
+            # 1) Honor explicit FILE_NAME
+            fn = str(row.get('FILE_NAME') or '').strip()
+            if fn and fn in images_map:
+                return fn
+
+            call = row.get('CALL','') or ''
+            pname = row.get('PLAY_NAME','') or ''
+            formation = str(row.get('FORMATION','') or '')
+            strength = str(row.get('STRENGTH','') or '')
+
+            base_from_call = _strip_motions(_after_dot(call))
+            base_from_pname = _after_dot(pname)
+
+            candidate_texts = []
+            for base in [base_from_call, base_from_pname]:
+                if base:
+                    candidate_texts.append(f"{formation} {base}")
+                    if strength:
+                        candidate_texts.append(f"{formation} {strength} {base}")
+                    candidate_texts.append(base)  # fallback
+            if pname:
+                candidate_texts.append(pname.replace('. ', ' '))
+
+            from difflib import SequenceMatcher
+            keynorms = [_canon(t) for t in candidate_texts if t]
+            filenorm = {fname: _canon(Path(fname).stem) for fname in images_map.keys()}
+
+            best_name, best_score = None, 0.0
+            play_piece = _canon(base_from_call or base_from_pname)
+            form_piece = _canon(formation + (' ' + strength if strength else ''))
+
+            for fname, fstem in filenorm.items():
+                for kn in keynorms:
+                    if not kn: continue
+                    score = SequenceMatcher(None, fstem, kn).ratio()
+                    if play_piece and play_piece in fstem: score += 0.25
+                    if form_piece and form_piece in fstem: score += 0.20
+                    if play_piece and form_piece and (play_piece in fstem and form_piece in fstem): score += 0.20
+                    if kn in fstem or fstem in kn: score += 0.10
+                    if score > best_score:
+                        best_score, best_name = score, fname
+
+            return best_name if (best_name and best_score >= 0.55) else None
+
+        def _img_tag_for_row(row):
+            if not include_imgs: return ''
+            fname = _find_best_image_for(row)
+            if not fname: return ''
+            b = images_map.get(fname)
+            if not b: return ''
+            mime = _guess_mime(fname)
+            b64 = base64.b64encode(b).decode('utf-8')
+            return f'<img class="thumb" src="data:{mime};base64,{b64}" />'
+
+        def _esc(s):
+            try:
+                import html as _html
+                return _html.escape('' if s is None else str(s))
+            except Exception:
+                return str(s)
+
+        parts = []
+        parts.append(f"""
+        <style>
+        @media print {{
+          @page {{ size: Letter landscape; margin: 0.35in; }}
+          body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+        }}
+        body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
+        .bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
+        .bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
+        .row {{ display:flex; align-items:center; gap:8px; padding:6px 10px; border-top:1px solid #eee; }}
+        .thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; }}
+        .main {{ font-weight:700; font-size:14px; }}
+        .meta {{ font-size:12px; color:#334155; }}
+        </style>
+        """)
+
+        for bucket, dfb in call_sheet.groupby('Bucket', sort=False):
+            parts.append(f'<div class="bucket"><div class="bktitle">{_esc(bucket)}</div>')
+            for _, r in dfb.iterrows():
+                call = _esc(r.get('CALL',''))
+                form = _esc(r.get('FORMATION','')); strn = _esc(r.get('STRENGTH',''))
+                pers = _esc(r.get('PERSONNEL',''))
+                recip = _esc(r.get('RECIPIENT_LETTER',''))
+                cov = _esc(r.get('COVERAGE_TAGS','')); press = _esc(r.get('PRESSURE_TAGS',''))
+                situ = _esc(r.get('SITUATION_TAGS',''))
+                concept = _esc(r.get('CONCEPT_TAGS',''))
+                img = _img_tag_for_row(r)
+
+                meta_bits = [x for x in [
+                    f"{form} {strn}".strip(),
+                    f"Pers {pers}" if pers else '',
+                    f"Recipient {recip}" if recip else '',
+                    situ
+                ] if x]
+                meta_line = ' | '.join(meta_bits)
+                tags_line = ' • '.join([x for x in [concept, cov, press] if x])
+
+                parts.append(f'''
+                  <div class="row">
+                    {img if img else ''}
+                    <div>
+                      <div class="main">{call}</div>
+                      <div class="meta">{_esc(meta_line)}</div>
+                      {f'<div class="meta">{_esc(tags_line)}</div>' if tags_line else ''}
+                    </div>
+                  </div>
+                ''')
+            parts.append('</div>')
+        html_str = "\n".join(parts)
+
+        st.components.v1.html(html_str, height=800, scrolling=True)
+        st.download_button("⬇️ Download OC_OnePager.html", data=html_str.encode('utf-8'), file_name="OC_OnePager.html", mime="text/html")
+except Exception as _e:
+    st.warning(f"One-Pager build skipped: {_e}")
