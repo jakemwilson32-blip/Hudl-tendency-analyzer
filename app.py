@@ -258,57 +258,100 @@ def handle_image_uploads(files):
 def safe_rate(n, d):
     return (n / d) if d else 0.0
 
-
 def build_suggestions(overall, by_down, by_dist, by_form, blitz_3rd, cov_3rd, hash_tbl, motion_tbl, sample_size, sr_overall, xpl_overall):
+    """Robust when grouped tables are empty or missing columns."""
     suggestions = []
+
+    # Sample size + overall mix
     if sample_size < 25:
         suggestions.append(f"Warning: small sample ({sample_size} plays). Treat tendencies with caution.")
+
     total = overall["plays"].sum() if len(overall) else 0
-    rp = overall[overall["PLAY_TYPE_NORM"].isin(["Run","Pass","Screen"]) ]
-    run_p = safe_rate(rp[rp["PLAY_TYPE_NORM"]=="Run"]["plays"].sum(), total)
-    pass_p = safe_rate(rp[rp["PLAY_TYPE_NORM"]=="Pass"]["plays"].sum(), total)
-    screen_p = safe_rate(rp[rp["PLAY_TYPE_NORM"]=="Screen"]["plays"].sum(), total)
-    if run_p >= 0.60: suggestions.append(f"Run-heavy profile overall ({run_p:.0%}). Def: extra fitter on early downs; Off: play-action shots.")
-    elif pass_p >= 0.60: suggestions.append(f"Pass-heavy profile overall ({pass_p:.0%}). Def: simulated pressures, late rotation from two-high.")
-    if screen_p >= 0.10: suggestions.append(f"Screens appear {screen_p:.0%}. DL retrace; keep RB/WR/TE screen menu ready.")
-    if not np.isnan(sr_overall): suggestions.append(f"Estimated success rate: {sr_overall:.0%} (success = gain ≥ yard-to-go on 1st/2nd, or conversion on 3rd).")
-    if not np.isnan(xpl_overall): suggestions.append(f"Explosive rate: {xpl_overall:.0%} (10+ rush / 15+ pass).")
-    for d in [1,2,3]:
-        sub = by_down[by_down["DN"]==d]
-        if len(sub):
-            r = sub[sub["PLAY_TYPE_NORM"]=="Run"]["%"].sum() if "Run" in set(sub["PLAY_TYPE_NORM"]) else 0
-            p = sub[sub["PLAY_TYPE_NORM"]=="Pass"]["%"].sum() if "Pass" in set(sub["PLAY_TYPE_NORM"]) else 0
-            if d==1 and r>=60: suggestions.append("1st down leans run. Fit downhill; be alert for play-action off base runs.")
-            if d==3 and p>=70: suggestions.append("3rd down leans pass. Def: simulated pressure, play the sticks. Off: quick man/zone beaters.")
-    td = by_dist[(by_dist["DN"]==3)]
-    if len(td):
-        long_pass = td[(td["DIST_BUCKET"]=="long (7-10)") & (td["PLAY_TYPE_NORM"]=="Pass")]
-        if len(long_pass) and long_pass["%"].iloc[0] >= 70: suggestions.append("3rd & 7–10 high pass tendency. Off: Flood/Sail or Dagger. Def: mug A-gaps, spin to 3-robber.")
-        vl_pass = td[(td["DIST_BUCKET"]=="very long (11+)") & (td["PLAY_TYPE_NORM"]=="Pass")]
-        if len(vl_pass) and vl_pass["%"].iloc[0] >= 80: suggestions.append("3rd & 11+ = must-pass. Spy QB if mobile; Off: max-protect shots vs soft zone.")
-    if len(by_form):
+    if len(overall) and {"PLAY_TYPE_NORM", "plays"} <= set(overall.columns):
+        rp = overall[overall["PLAY_TYPE_NORM"].isin(["Run", "Pass", "Screen"])]
+        run_p   = (rp[rp["PLAY_TYPE_NORM"] == "Run"]["plays"].sum()   / total) if total else 0
+        pass_p  = (rp[rp["PLAY_TYPE_NORM"] == "Pass"]["plays"].sum()  / total) if total else 0
+        screen_p= (rp[rp["PLAY_TYPE_NORM"] == "Screen"]["plays"].sum()/ total) if total else 0
+
+        if run_p >= 0.60:
+            suggestions.append(f"Run-heavy profile overall ({run_p:.0%}). Def: extra fitter on early downs; Off: play-action shots.")
+        elif pass_p >= 0.60:
+            suggestions.append(f"Pass-heavy profile overall ({pass_p:.0%}). Def: simulated pressures, late rotation from two-high.")
+        if screen_p >= 0.10:
+            suggestions.append(f"Screens appear {screen_p:.0%}. DL retrace; keep RB/WR/TE screen menu ready.")
+
+    # Efficiency context
+    if not np.isnan(sr_overall):
+        suggestions.append(f"Estimated success rate: {sr_overall:.0%} (success = gain ≥ yard-to-go on 1st/2nd, or conversion on 3rd).")
+    if not np.isnan(xpl_overall):
+        suggestions.append(f"Explosive rate: {xpl_overall:.0%} (10+ rush / 15+ pass).")
+
+    # By Down
+    if len(by_down) and {"DN", "PLAY_TYPE_NORM", "%"} <= set(by_down.columns):
+        for d in [1, 2, 3]:
+            sub = by_down[by_down["DN"] == d]
+            if len(sub):
+                types = set(sub["PLAY_TYPE_NORM"])
+                r = sub[sub["PLAY_TYPE_NORM"] == "Run"]["%"].sum()  if "Run"  in types else 0
+                p = sub[sub["PLAY_TYPE_NORM"] == "Pass"]["%"].sum() if "Pass" in types else 0
+                if d == 1 and r >= 60:
+                    suggestions.append("1st down leans run. Fit downhill; be alert for play-action off base runs.")
+                if d == 3 and p >= 70:
+                    suggestions.append("3rd down leans pass. Def: simulated pressure, play the sticks. Off: quick man/zone beaters.")
+
+    # 3rd & Distance
+    if len(by_dist) and {"DN", "DIST_BUCKET", "PLAY_TYPE_NORM", "%"} <= set(by_dist.columns):
+        td = by_dist[by_dist["DN"] == 3]
+        if len(td):
+            lp = td[(td["DIST_BUCKET"] == "long (7-10)") & (td["PLAY_TYPE_NORM"] == "Pass")]
+            if len(lp) and lp["%"].iloc[0] >= 70:
+                suggestions.append("3rd & 7–10 high pass tendency. Off: Flood/Sail or Dagger. Def: mug A-gaps, spin to 3-robber.")
+            vl = td[(td["DIST_BUCKET"] == "very long (11+)") & (td["PLAY_TYPE_NORM"] == "Pass")]
+            if len(vl) and vl["%"].iloc[0] >= 80:
+                suggestions.append("3rd & 11+ = must-pass. Spy QB if mobile; Off: max-protect shots vs soft zone.")
+
+    # Top formation
+    if len(by_form) and {"OFF_FORM", "PLAY_TYPE_NORM", "plays", "%"} <= set(by_form.columns):
         top_form = by_form.groupby(["OFF_FORM"])["plays"].sum().reset_index().sort_values("plays", ascending=False).head(1)
         if len(top_form):
             f = str(top_form["OFF_FORM"].iloc[0])
-            f_tbl = by_form[by_form["OFF_FORM"]==f]
-            run_bias = f_tbl[f_tbl["PLAY_TYPE_NORM"]=="Run"]["%"].sum() if "Run" in set(f_tbl["PLAY_TYPE_NORM"]) else 0
-            if run_bias >= 65: suggestions.append(f"In {f}, strong run tendency (~{run_bias:.0f}%). Def: set edges, close interior gaps. Off: play-action counters from same look.")
-    if len(blitz_3rd) and (blitz_3rd["blitz_rate"] >= 0.35).any():
-        suggestions.append("They pressure on 3rd (≥35%). Off: screens, quick game, hot throws; consider max-protect shots.")
-    if len(cov_3rd):
+            f_tbl = by_form[by_form["OFF_FORM"] == f]
+            types = set(f_tbl["PLAY_TYPE_NORM"])
+            run_bias = f_tbl[f_tbl["PLAY_TYPE_NORM"] == "Run"]["%"].sum() if "Run" in types else 0
+            if run_bias >= 65:
+                suggestions.append(f"In {f}, strong run tendency (~{run_bias:.0f}%). Def: set edges, close interior gaps. Off: play-action counters from same look.")
+
+    # 3rd-down pressure & coverage
+    if len(blitz_3rd) and "blitz_rate" in blitz_3rd.columns:
+        if (blitz_3rd["blitz_rate"] >= 0.35).any():
+            suggestions.append("They pressure on 3rd (≥35%). Off: screens, quick game, hot throws; consider max-protect shots.")
+    if len(cov_3rd) and {"COVERAGE_N", "plays"} <= set(cov_3rd.columns):
         top_cov = cov_3rd.groupby(["COVERAGE_N"])["plays"].sum().reset_index().sort_values("plays", ascending=False).head(1)
         if len(top_cov):
             cov = top_cov["COVERAGE_N"].iloc[0]
-            if cov in {"COVER 1","C1","MAN","COVER1"}: suggestions.append("3rd = Man. Off: Mesh, rub/stack, option routes, back-shoulder.")
-            if cov in {"COVER 3","C3","THREE","COVER3"}: suggestions.append("3rd = Cover 3 (MOFC). Off: Flood/Sail, Curl-Flat, Dagger; attack seams/curl window.")
-            if cov in {"COVER 4","C4","QUARTERS"}: suggestions.append("3rd = Quarters. Off: posts & benders, scissors, deep overs.")
-    if len(hash_tbl):
-        left = hash_tbl[hash_tbl["HASH_N"]=="L"]["%"].sum() if any(hash_tbl["HASH_N"]=="L") else 0
-        right = hash_tbl[hash_tbl["HASH_N"]=="R"]["%"].sum() if any(hash_tbl["HASH_N"]=="R") else 0
-        if left >= 55: suggestions.append("Left-hash bias. Off: set strength to field; Def: set strength to boundary, fit fast to field.")
-        if right >= 55: suggestions.append("Right-hash bias. Off: formation into field with RPO/screens; Def: rotate down to wide side.")
-    if len(motion_tbl) and (motion_tbl["%"] >= 50).any(): suggestions.append("Heavy motion usage. Off: use motion to ID coverage/leverage; Def: bump/roll with motion.")
-    if not suggestions: suggestions.append("Tendencies balanced. Build a call sheet with answers by situation: pressure answers, man beaters, Cover 3/Quarters concepts, and screen menu.")
+            if cov in {"COVER 1","C1","MAN","COVER1"}:
+                suggestions.append("3rd = Man. Off: Mesh, rub/stack, option routes, back-shoulder.")
+            if cov in {"COVER 3","C3","THREE","COVER3"}:
+                suggestions.append("3rd = Cover 3 (MOFC). Off: Flood/Sail, Curl-Flat, Dagger; attack seams/curl window.")
+            if cov in {"COVER 4","C4","QUARTERS"}:
+                suggestions.append("3rd = Quarters. Off: posts & benders, scissors, deep overs.")
+
+    # Hash tendencies
+    if len(hash_tbl) and {"HASH_N", "%"} <= set(hash_tbl.columns):
+        left  = hash_tbl[hash_tbl["HASH_N"] == "L"]["%"].sum() if (hash_tbl["HASH_N"] == "L").any() else 0
+        right = hash_tbl[hash_tbl["HASH_N"] == "R"]["%"].sum() if (hash_tbl["HASH_N"] == "R").any() else 0
+        if left >= 55:
+            suggestions.append("Left-hash bias. Off: set strength to field; Def: set strength to boundary, fit fast to field.")
+        if right >= 55:
+            suggestions.append("Right-hash bias. Off: formation into field with RPO/screens; Def: rotate down to wide side.")
+
+    # Motion usage
+    if len(motion_tbl) and "%" in motion_tbl.columns:
+        if (motion_tbl["%"] >= 50).any():
+            suggestions.append("Heavy motion usage. Off: use motion to ID coverage/leverage; Def: bump/roll with motion.")
+
+    if not suggestions:
+        suggestions.append("Tendencies balanced. Build a call sheet with answers by situation: pressure answers, man beaters, Cover 3/Quarters concepts, and screen menu.")
     return suggestions
 
 # -----------------------
