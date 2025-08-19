@@ -841,11 +841,13 @@ with st.expander("Offense-Focused Matchup Builder (Our O vs Their D)", expanded=
             if any(k in s for k in ["COVER 2", "C2", "TWO"]): return "C2"
             return "UNK"
 
-        opp_cov = opp_df.copy()
-        opp_cov["COVN"] = opp_cov.get("COVERAGE", "").apply(_cov_norm)
-        cov_dist = opp_cov["COVN"].value_counts(normalize=True).to_dict()
+opp_cov = opp_df.copy()
+# robust to missing COVERAGE column
+cov_series = opp_cov.get("COVERAGE", pd.Series(index=opp_cov.index, dtype=object))
+opp_cov["COVN"] = cov_series.astype(str).apply(_cov_norm)
+cov_dist = opp_cov["COVN"].value_counts(normalize=True).to_dict()
 
-        blitz_3rd_tbl = compute_blitz_rate(opp_df[opp_df.get("DN")==3], ["DIST_BUCKET"]) if "DIST_BUCKET" in opp_df.columns else pd.DataFrame()
+blitz_3rd_tbl = compute_blitz_rate(opp_df[opp_df["DN"] == 3], ["DIST_BUCKET"]) if "DIST_BUCKET" in opp_df.columns and "DN" in opp_df.columns else pd.DataFrame()
         opp_blitz3 = float(blitz_3rd_tbl["blitz_rate"].mean()) if len(blitz_3rd_tbl) else 0.0
 
         # --- Our concept success profile (optional) ---
@@ -1020,11 +1022,12 @@ try:
             return best_name if (best_name and best_score >= 0.55) else None
 
         def _img_tag_for_row(row):
-            if not include_imgs: return ''
-            fname = _find_best_image_for(row)
-            if not fname: return ''
-            b = images_map.get(fname)
-            if not b: return ''
+            if not images_map: return ''
+fname = _find_best_image_for(row)
+if not fname: return ''
+b = images_map.get(fname)
+if not b: return ''
+
             mime = _guess_mime(fname)
             b64 = base64.b64encode(b).decode('utf-8')
             return f'<img class="thumb" src="data:{mime};base64,{b64}" />'
