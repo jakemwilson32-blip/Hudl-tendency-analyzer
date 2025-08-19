@@ -185,30 +185,78 @@ def compute_coverage(df: pd.DataFrame, dims):
     return tbl.sort_values(dims + ["plays"], ascending=[True]*len(dims) + [False])
 
 
+# ---------- Playbook persistence helpers ----------
+PLAYBOOK_COLS = [
+    "PLAY_NAME","PERSONNEL","FORMATION","STRENGTH",
+    "CONCEPT_TAGS","SITUATION_TAGS","COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"
+]
+
+@st.cache_data(show_spinner=False)
+def play_index_template_bytes() -> bytes:
+    df = pd.DataFrame(columns=PLAYBOOK_COLS)
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    return buf.getvalue().encode("utf-8")
+
 def serialize_playbook(pb: dict) -> dict:
-    out = {'plays': pb.get('plays', []), 'images': {}, 'sheets_csv_url': st.session_state.get('SHEETS_CSV_URL',''), 'sheets_write_url': st.session_state.get('SHEETS_WRITE_URL',''), 'favorites': sorted(st.session_state.get('FAVORITES', set()))}
-    for fname, b in pb.get('images', {}).items():
-        try: out['images'][fname] = base64.b64encode(b).decode('utf-8')
-        except Exception: pass
+    """
+    Convert in-memory playbook (including raw image bytes) to a JSON-safe dict.
+    Also persists Sheets URLs and favorites from session_state.
+    """
+    out = {
+        "plays": pb.get("plays", []),
+        "images": {},
+        "sheets_csv_url": st.session_state.get("SHEETS_CSV_URL", ""),
+        "sheets_write_url": st.session_state.get("SHEETS_WRITE_URL", ""),
+        "favorites": sorted(st.session_state.get("FAVORITES", set())),
+    }
+    for fname, b in pb.get("images", {}).items():
+        try:
+            out["images"][fname] = base64.b64encode(b).decode("utf-8")
+        except Exception:
+            pass
     return out
 
-
 def deserialize_playbook(pb_json: dict) -> dict:
-    pb = {'plays': pb_json.get('plays', []), 'images': {}}
-    for fname, s in pb_json.get('images', {}).items():
-        try: pb['images'][fname] = base64.b64decode(s.encode('utf-8'))
-        except Exception: pass
-    st.session_state['SHEETS_CSV_URL'] = pb_json.get('sheets_csv_url', '')
-    st.session_state['SHEETS_WRITE_URL'] = pb_json.get('sheets_write_url', '')
-st.session_state['FAVORITES'] = set(pb_json.get('favorites', []))
-return pb
+    """
+    Load a JSON-safe dict back into an in-memory playbook.
+    Restores images (bytes), Sheets URLs, and favorites into st.session_state.
+    """
+    pb = {"plays": pb_json.get("plays", []), "images": {}}
 
+    for fname, s in pb_json.get("images", {}).items():
+        try:
+            pb["images"][fname] = base64.b64decode(s.encode("utf-8"))
+        except Exception:
+            pass
+
+    # restore auxiliary state
+    st.session_state["SHEETS_CSV_URL"] = pb_json.get("sheets_csv_url", "")
+    st.session_state["SHEETS_WRITE_URL"] = pb_json.get("sheets_write_url", "")
+    try:
+        st.session_state["FAVORITES"] = set(pb_json.get("favorites", []))
+    except Exception:
+        st.session_state["FAVORITES"] = set()
+
+    return pb
+
+def load_playbook_from_sheets_csv(url: str) -> pd.DataFrame:
+    # expects a Google Sheets "Publish to the web" CSV URL
+    return pd.read_csv(url)
 
 def push_playbook_to_webhook(url: str, rows: list) -> str:
-    payload = json.dumps({'rows': rows, 'replace': True, 'columns': PLAYBOOK_COLS}).encode('utf-8')
-    req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+    """
+    Posts JSON rows to a Google Apps Script Web App (for writing to Google Sheets).
+    The Apps Script should accept JSON with { rows, replace, columns }.
+    """
+    payload = json.dumps({
+        "rows": rows,
+        "replace": True,
+        "columns": PLAYBOOK_COLS
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=20) as resp:
-        return resp.read().decode('utf-8')
+        return resp.read().decode("utf-8")
 
 # -----------------------
 # UI helpers
