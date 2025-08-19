@@ -770,18 +770,44 @@ try:
     include_imgs = st.checkbox("Include play art (from uploaded images)", True, key="onepager_imgs")
     thumb_px = st.slider("Thumbnail size (px)", 60, 140, 90, 10, key="onepager_thumb")
 
-    # --- Robust image lookup helpers (case-insensitive, extension-agnostic) ---
-    import re, unicodedata
+    # --- Fuzzy image lookup helpers (tolerant to LT/RT, color words, typos) ---
+    import re, unicodedata, difflib
+    from pathlib import Path
 
-    def _canon(s: str) -> str:
+    # Token maps: normalize sides and colors so LT/RT or Black/Red don't block a match
+    _SIDE_MAP = {
+        "lt":"SIDE","left":"SIDE","l":"SIDE",
+        "rt":"SIDE","right":"SIDE","r":"SIDE",
+    }
+    _COLOR_TOKENS = {
+        "black","blk","red","blue","green","white","yellow","gold","silver",
+        "orange","purple","maroon","navy","teal","gray","grey"
+    }
+
+    def _canon_text(s: str) -> str:
+        """ASCII, lower, strip non-alphanumerics (keeps only a-z0-9)."""
         t = unicodedata.normalize('NFKD', str(s or '')).encode('ascii', 'ignore').decode('ascii')
         return re.sub(r'[^a-z0-9]+', '', t.lower())
 
-    def _norm_basename(s: str) -> str:
-        return Path(str(s or '').strip()).name.lower()
+    def _split_tokens(s: str) -> list[str]:
+        """Split on common separators and spaces; keep alphanum tokens."""
+        t = re.sub(r'[^A-Za-z0-9]+', ' ', str(s or ''))
+        return [w for w in t.lower().split() if w]
 
-    def _stem_canon(s: str) -> str:
-        return _canon(Path(str(s or '')).stem)
+    def _normalize_token(tok: str) -> str:
+        """Map side/color tokens to neutral buckets so small differences still match."""
+        if tok in _SIDE_MAP:
+            return _SIDE_MAP[tok]
+        if tok in _COLOR_TOKENS:
+            return "COLOR"
+        return tok
+
+    def _canon_tokens(s: str) -> list[str]:
+        """Canonical token list (order-insensitive)."""
+        raw = _split_tokens(s)
+        norm = [_normalize_token(w) for w in raw]
+        # remove duplicates but keep determinism
+        return sorted(set(norm))
 
     def _guess_mime(name: str) -> str:
         n = str(name or '').lower()
@@ -789,42 +815,81 @@ try:
         if n.endswith('.webp'): return 'image/webp'
         return 'image/png'
 
-    # Build indexes once per render
-    _image_by_basename: dict[str, str] = {}  # "play.png" or "play" -> stored key
-    _image_by_stem: dict[str, str] = {}      # canon(stem) -> stored key
+    # Build fast exact-lookup maps + fuzzy candidates once per render
+    _image_by_basename = {}  # "play.png" or "play" (lower) -> stored_key
+    _image_by_stem     = {}  # canon(stem) -> stored_key
+    _image_candidates  = []  # (stored_key, canon_stem_string, token_set)
 
     if images_map:
         for stored_key in images_map.keys():
-            base = _norm_basename(stored_key)          # e.g. "play.png"
-            stem_lower = Path(base).stem.lower()       # e.g. "play"
-            stem_c = _stem_canon(base)                 # e.g. "play"
+            base = Path(stored_key).name.lower()      # e.g., "bundle_left.png"
+            stem = Path(base).stem                     # "bundle_left"
+            canon_stem = _canon_text(stem)             # "bundleleft"
+            tok_set = set(_canon_tokens(stem))         # {"bundle","SIDE"}
+
+            # exact/fast paths
             _image_by_basename[base] = stored_key
-            _image_by_basename[stem_lower] = stored_key
-            _image_by_stem[stem_c] = stored_key
+            _image_by_basename[stem] = stored_key
+            _image_by_stem[canon_stem] = stored_key
+
+            # fuzzy pool
+            _image_candidates.append((stored_key, canon_stem, tok_set))
+
+    def _best_fuzzy_match(name_or_file: str) -> Optional[str]:
+        """Pick the closest image by combined token Jaccard + string ratio."""
+        if not name_or_file:
+            return None
+        cs = _canon_text(Path(str(name_or_file)).stem)
+        toks = set(_canon_tokens(Path(str(name_or_file)).stem))
+        if not cs:
+            return None
+
+        best_key, best_score = None, 0.0
+        for stored_key, cs2, toks2 in _image_candidates:
+            # token Jaccard (order-insensitive, robust to RT/LT, colors)
+            inter = len(toks & toks2)
+            union = len(toks | toks2) or 1
+            jacc = inter / union
+
+            # string similarity on canonicalized stems
+            ratio = difflib.SequenceMatcher(None, cs, cs2).ratio()
+
+            # blend scores; weight tokens more (handles synonyms), keep ratio as tie-breaker
+            score = 0.65 * jacc + 0.35 * ratio
+
+            # light boost if one contains the other (helps with minor suffixes)
+            if cs in cs2 or cs2 in cs:
+                score += 0.05
+
+            if score > best_score:
+                best_key, best_score = stored_key, score
+
+        # threshold: 0.55 is forgiving but avoids totally wrong picks
+        return best_key if best_score >= 0.55 else None
 
     def _find_image(row) -> Optional[str]:
-        # 1) Prefer FILE_NAME (case-insensitive; with/without extension)
+        """Resolve image by (1) FILE_NAME exact-ish, (2) PLAY_NAME fuzzy."""
+        # 1) FILE_NAME exact-ish (case-insensitive, extension-agnostic)
         fn_raw = str(row.get('FILE_NAME') or '').strip()
         if fn_raw:
-            base = _norm_basename(fn_raw)
+            base = Path(fn_raw).name.lower()          # "Play.PNG" -> "play.png"
+            stem = Path(base).stem.lower()            # "play"
+            cs   = _canon_text(stem)
+
             if base in _image_by_basename:
                 return _image_by_basename[base]
-            stem_lower = Path(base).stem.lower()
-            if stem_lower in _image_by_basename:
-                return _image_by_basename[stem_lower]
-            cs = _stem_canon(base)
+            if stem in _image_by_basename:
+                return _image_by_basename[stem]
             if cs in _image_by_stem:
                 return _image_by_stem[cs]
-        # 2) Fallback: match by PLAY_NAME
-        name_c = _stem_canon(row.get('PLAY_NAME', ''))
-        if name_c in _image_by_stem:
-            return _image_by_stem[name_c]
-        # 3) Soft contains
-        if name_c:
-            for s, stored_key in _image_by_stem.items():
-                if name_c in s or s in name_c:
-                    return stored_key
-        return None
+
+            # 1b) fuzzy on FILE_NAME stem
+            hit = _best_fuzzy_match(stem)
+            if hit:
+                return hit
+
+        # 2) Fallback: fuzzy by PLAY_NAME
+        return _best_fuzzy_match(row.get('PLAY_NAME', ''))
 
     def _img_tag(row):
         if not include_imgs or not images_map:
