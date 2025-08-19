@@ -851,7 +851,7 @@ blitz_3rd_tbl = compute_blitz_rate(opp_df[opp_df["DN"] == 3], ["DIST_BUCKET"]) i
 opp_blitz3 = float(blitz_3rd_tbl["blitz_rate"].mean()) if len(blitz_3rd_tbl) else 0.0
 
         # --- Our concept success profile (optional) ---
-    concept_map = {
+concept_map = {
             "mesh":["mesh"], "smash":["smash"], "flood":["flood","sail"], "dagger":["dagger"],
             "curlflat":["curl flat","curl-flat","curl","flat"], "screen":["screen","bubble","tunnel"],
             "iz":["inside zone","iz"], "oz":["outside zone","oz","stretch"], "power":["power"], "counter":["counter"],
