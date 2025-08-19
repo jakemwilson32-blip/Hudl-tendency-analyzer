@@ -429,3 +429,672 @@ with col_pb1:
         st.success(msg)
 
     st.markdown("**Index your plays with a CSV** (or add rows manually).")
+
+    st.download_button("Download Play Index CSV Template", data=play_index_template_bytes(), file_name="play_index_template.csv", mime="text/csv")
+    play_index_csv = st.file_uploader("Upload play_index.csv (columns: " + ", ".join(PLAYBOOK_COLS) + ")", type=["csv"], key="pbidx")
+    if play_index_csv:
+        try:
+            df_idx = pd.read_csv(play_index_csv)
+            missing_cols = [c for c in PLAYBOOK_COLS if c not in df_idx.columns]
+            if missing_cols:
+                st.error("Missing columns in play_index.csv: " + ", ".join(missing_cols))
+            else:
+                rows = df_idx.to_dict(orient='records')
+                st.session_state.PLAYBOOK['plays'] = rows
+                st.success(f"Indexed {len(rows)} plays.")
+        except Exception as e:
+            st.error(f"Could not read play_index.csv: {e}")
+
+    st.markdown("**Save your playbook** (download a .json to reuse later)")
+    pb_bytes = json.dumps(serialize_playbook(st.session_state.PLAYBOOK)).encode('utf-8')
+    st.download_button("⬇️ Save Playbook Library (playbook.json)", data=pb_bytes, file_name="playbook.json", mime="application/json")
+
+with col_pb2:
+    st.markdown("**B) Google Sheets Sync (optional)**")
+    st.caption("No installs. Use a Google Sheet as your play index. 'Publish to web' → paste CSV link below.")
+    sheets_url = st.text_input("Google Sheets — Published CSV URL (read-only)", value=st.session_state.get('SHEETS_CSV_URL',''), placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?gid=0&single=true&output=csv")
+    if st.button("Load from Google Sheets"):
+        try:
+            df_idx = pd.read_csv(sheets_url)
+            missing_cols = [c for c in PLAYBOOK_COLS if c not in df_idx.columns]
+            if missing_cols:
+                st.error("Your sheet is missing columns: " + ", ".join(missing_cols))
+            else:
+                st.session_state.PLAYBOOK['plays'] = df_idx.to_dict(orient='records')
+                st.session_state.SHEETS_CSV_URL = sheets_url
+                st.success(f"Loaded {len(df_idx)} plays from Google Sheets.")
+        except Exception as e:
+            st.error(f"Couldn't load Google Sheets CSV: {e}")
+
+    writer_url = st.text_input("Google Apps Script Web App URL (for Save → Sheets, optional)", value=st.session_state.get('SHEETS_WRITE_URL',''), placeholder="https://script.google.com/macros/s/AKfycb.../exec")
+    if st.button("Push library to Google Sheets"):
+        try:
+            resp = push_playbook_to_webhook(writer_url, st.session_state.PLAYBOOK.get('plays', []))
+            st.session_state.SHEETS_WRITE_URL = writer_url
+            st.success("Pushed to Google Sheets. Response: " + str(resp)[:200])
+        except Exception as e:
+            st.error(f"Push failed: {e}")
+
+    st.markdown("**Quick Add (single play)**")
+    with st.form("quick_add_play"):
+        qa_name = st.text_input("Play Name")
+        qa_personnel = st.text_input("Personnel (e.g., 11, 12, 20)")
+        qa_form = st.text_input("Formation (e.g., Trips, Bunch, Singleback)")
+        qa_strength = st.text_input("Strength (Right/Left/Boundary/Field)")
+        qa_concepts = st.text_input("Concept tags (comma-separated: Flood, Mesh, Curl-Flat, PA, Boot, RPO, IZ, OZ, Power, Counter)")
+        qa_situ = st.text_input("Situation tags (3rd&7-10, 1st&10, RZ, 2-minute, vs Nickel)")
+        qa_cov = st.text_input("Coverage tags (vs Man, vs C3, vs Quarters)")
+        qa_press = st.text_input("Pressure tags (vs Blitz, vs 5-man, vs DB blitz)")
+        qa_file = st.text_input("Image file name (must match an uploaded image)")
+        submitted = st.form_submit_button("Add Play")
+        if submitted:
+            st.session_state.PLAYBOOK['plays'].append({
+                'PLAY_NAME': qa_name,
+                'PERSONNEL': qa_personnel,
+                'FORMATION': qa_form,
+                'STRENGTH': qa_strength,
+                'CONCEPT_TAGS': qa_concepts,
+                'SITUATION_TAGS': qa_situ,
+                'COVERAGE_TAGS': qa_cov,
+                'PRESSURE_TAGS': qa_press,
+                'FILE_NAME': qa_file,
+            })
+            st.success(f"Added play: {qa_name}")
+
+# -----------------------
+# Call Sheet Rules (formations & screens)
+# -----------------------
+with st.expander("Call Sheet Rules (formations & screens)"):
+    lib_for_opts = pd.DataFrame(st.session_state.PLAYBOOK.get('plays', []))
+    form_opts = sorted(set(str(x).upper() for x in lib_for_opts.get('FORMATION', pd.Series(dtype=str)).dropna().unique())) or [
+        "DICE","DECK","DOUBLES","DOS","TRIPS","TWIG","TREY","TRIO","BUNCH","BUNDLE","GANG","GLOCK","GAUGE","EMPTY","EGO"
+    ]
+    rules = st.session_state.get('CONCEPT_FORMATION_RULES', {})
+
+    def _rule_ui(concept_key: str, label: str):
+        current = [s.upper() for s in rules.get(concept_key, [])]
+        picked = st.multiselect(f"Allowed formations for {label}", options=form_opts, default=current, key=f"rule_{concept_key}")
+        rules[concept_key] = picked
+
+    _rule_ui('TRAIN','TRAIN (tunnel screen)')
+    _rule_ui('VIPER','VIPER (swing screen)')
+    _rule_ui('UNICORN','UNICORN (throwback)')
+    _rule_ui('UTAH','UTAH (shovel/drag)')
+    st.session_state.CONCEPT_FORMATION_RULES = rules
+
+    st.markdown("**Screen recipient letters (order of preference)**")
+    order_str = st.text_input("Letters in order (comma-separated)", value=",".join(st.session_state.get('SCREEN_RECIPIENT_ORDER', ['Y','Z','H','X','F'])))
+    try:
+        parsed = [s.strip().upper() for s in order_str.split(',') if s.strip()]
+        if parsed:
+            st.session_state.SCREEN_RECIPIENT_ORDER = parsed
+    except Exception:
+        pass
+
+# -----------------------
+# File upload (optional)
+# -----------------------
+file = st.file_uploader("Upload Hudl-style CSV or Excel (optional)", type=["csv","xlsx"]) 
+
+if not file:
+    st.info("No opponent data uploaded — that's okay! We'll still build a game plan from your Playbook Library below.")
+    raw = pd.DataFrame(columns=PRIMARY_COLS)
+else:
+    try:
+        if file.name.lower().endswith(".xlsx"):
+            raw = pd.read_excel(file, engine="openpyxl")
+        else:
+            raw = pd.read_csv(file)
+    except ImportError:
+        st.warning("Excel support requires 'openpyxl' on the server. Either upload a CSV or add 'openpyxl' to requirements.txt. Proceeding without opponent data.")
+        raw = pd.DataFrame(columns=PRIMARY_COLS)
+
+raw = raw.rename(columns={k:v for k,v in ALIAS_MAP.items() if k in raw.columns})
+for c in PRIMARY_COLS:
+    if c not in raw.columns:
+        raw[c] = np.nan
+for col in ["DN","DIST","YARD_LN","QTR","GN_LS"]:
+    raw[col] = pd.to_numeric(raw[col], errors="coerce")
+
+raw["PLAY_TYPE_NORM"] = raw.apply(normalize_play_type, axis=1)
+raw["DIR_LMR"] = raw["PLAY_DIR"].apply(left_mid_right)
+raw["DIST_BUCKET"] = raw["DIST"].apply(to_bucket_dist)
+raw["HASH_N"] = raw["HASH"].astype(str).str.upper().str[0].map({"L":"L","R":"R","M":"M"}).fillna("U")
+raw["RED_ZONE"] = raw["YARD_LN"].apply(red_zone_flag)
+raw["FIELD_ZONE"] = raw["YARD_LN"].apply(field_zone)
+
+if "GN/LS" in raw.columns and raw["GN_LS"].isna().all():
+    raw["GN_LS"] = raw["GN/LS"].apply(coerce_gain)
+
+def success_row(r):
+    dn, dist, g = r.get("DN"), r.get("DIST"), r.get("GN_LS")
+    if pd.isna(dn) or pd.isna(dist) or pd.isna(g):
+        return np.nan
+    try:
+        dn = int(dn); dist = float(dist); g = float(g)
+    except Exception:
+        return np.nan
+    if dn == 1:
+        return g >= 0.5*dist
+    if dn == 2:
+        return g >= 0.7*dist
+    return g >= dist
+
+raw["SUCCESS"] = raw.apply(success_row, axis=1)
+raw["EXPLOSIVE"] = False
+raw.loc[(raw["PLAY_TYPE_NORM"]=="Run") & (raw["GN_LS"] >= 10), "EXPLOSIVE"] = True
+raw.loc[(raw["PLAY_TYPE_NORM"]=="Pass") & (raw["GN_LS"] >= 15), "EXPLOSIVE"] = True
+
+st.subheader("Data Diagnostics")
+key_cols = ["DN","DIST","YARD_LN","HASH","PLAY_TYPE","PLAY_TYPE_RPS","OFF_FORM","OFF_STR","BACKFIELD","PLAY_DIR","BLITZ","COVERAGE","MOTION","GN_LS"]
+missing = [c for c in key_cols if raw[c].isna().all()]
+non_null_counts = raw[key_cols].notna().sum().to_frame("non-null").T
+st.write("**Non-null counts (how much data do we have by column):**")
+st.dataframe(non_null_counts)
+if missing:
+    st.warning("No data found in: " + ", ".join(missing))
+
+overall = raw.groupby(["PLAY_TYPE_NORM"]).size().reset_index(name="plays")
+if len(overall):
+    overall["%"] = (100 * overall["plays"] / overall["plays"].sum()).round(1)
+
+sample_size = int(overall["plays"].sum()) if len(overall) else int(len(raw))
+sr_overall = raw["SUCCESS"].mean() if raw["SUCCESS"].notna().any() else np.nan
+xpl_overall = raw["EXPLOSIVE"].mean() if raw["GN_LS"].notna().any() else np.nan
+
+by_down = tendency_table(raw, ["DN"])            
+by_dist = tendency_table(raw, ["DN","DIST_BUCKET"])  
+by_hash = tendency_table(raw, ["HASH_N"])        
+by_form = tendency_table(raw, ["OFF_FORM","OFF_STR","BACKFIELD"])  
+by_dir = tendency_table(raw, ["DIR_LMR"])        
+by_fz = tendency_table(raw, ["FIELD_ZONE"])      
+by_rz = tendency_table(raw[raw["RED_ZONE"]=="yes"], ["DN"]) 
+
+blitz_3rd = compute_blitz_rate(raw[raw["DN"]==3], ["DIST_BUCKET"])   
+cov_3rd = compute_coverage(raw[raw["DN"]==3], ["DIST_BUCKET"])       
+
+motion_tbl = raw.copy()
+motion_tbl["MOTION_N"] = np.where(motion_tbl["MOTION"].astype(str).str.strip().eq(""), "None", "Motion")
+motion_tbl = motion_tbl.groupby(["MOTION_N","PLAY_TYPE_NORM"], dropna=False).size().reset_index(name="plays")
+den = motion_tbl.groupby(["MOTION_N"])['plays'].transform('sum').replace(0, np.nan)
+motion_tbl["%"] = ((100 * motion_tbl["plays"] / den).round(1)).fillna(0)
+
+st.subheader("Overview")
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.markdown("**Run/Pass/Screen Mix**")
+    if len(overall):
+        st.dataframe(overall)
+        if show_charts:
+            st.bar_chart(overall.set_index("PLAY_TYPE_NORM")["plays"])
+    else:
+        st.info("No PLAY_TYPE found. Check columns PLAY_TYPE or PLAY_TYPE_RPS or OFF_PLAY keywords.")
+with col2:
+    st.markdown("**Direction (L/M/R)**")
+    if len(by_dir): st.dataframe(by_dir)
+    else: st.info("No direction data (PLAY_DIR) present.")
+with col3:
+    st.markdown("**Efficiency**")
+    eff_lines = []
+    if not np.isnan(sr_overall): eff_lines.append(f"Success rate: {sr_overall:.0%}")
+    if not np.isnan(xpl_overall): eff_lines.append(f"Explosive rate: {xpl_overall:.0%}")
+    if eff_lines:
+        st.write("
+".join(eff_lines))
+    else:
+        st.info("Add GN_LS (gain/loss) to compute success & explosive rates.")
+
+st.divider()
+
+st.subheader("Situational Tendencies")
+exp = st.expander("By Down", expanded=True)
+with exp:
+    if len(by_down):
+        st.dataframe(by_down)
+        if show_charts:
+            pivot = by_down.pivot_table(index="DN", columns="PLAY_TYPE_NORM", values="%", fill_value=0)
+            st.bar_chart(pivot)
+    else:
+        st.info("Missing DN or PLAY_TYPE.")
+
+exp = st.expander("By Down & Distance")
+with exp:
+    if len(by_dist): st.dataframe(by_dist)
+    else: st.info("Missing DIST (yards to go) or PLAY_TYPE.")
+
+exp = st.expander("By Formation / Strength / Backfield")
+with exp:
+    if len(by_form): st.dataframe(by_form)
+    else: st.info("Missing OFF_FORM / OFF_STR / BACKFIELD.")
+
+c1, c2 = st.columns(2)
+with c1:
+    st.markdown("**By Hash**")
+    if len(by_hash): st.dataframe(by_hash)
+    else: st.info("Missing HASH.")
+with c2:
+    st.markdown("**By Field Zone**")
+    if len(by_fz): st.dataframe(by_fz)
+    else: st.info("Missing YARD_LN.")
+
+st.markdown("**Red Zone by Down**")
+if len(by_rz): st.dataframe(by_rz)
+else: st.info("No red-zone snaps detected (YARD_LN 1–20).")
+
+st.subheader("3rd Down Study")
+cc1, cc2 = st.columns(2)
+with cc1:
+    st.markdown("**Blitz Rate (3rd Down)**")
+    if len(blitz_3rd): st.dataframe(blitz_3rd)
+    else: st.info("Need BLITZ flags on 3rd down to compute.")
+with cc2:
+    st.markdown("**Coverage Usage (3rd Down)**")
+    if len(cov_3rd): st.dataframe(cov_3rd)
+    else: st.info("Need COVERAGE values on 3rd down to compute.")
+
+st.subheader("Motion Usage")
+if len(motion_tbl): st.dataframe(motion_tbl)
+else: st.info("No motion data found.")
+
+# -----------------------
+# Suggestions & Call Sheet (Universal)
+# -----------------------
+suggestions = build_suggestions(overall, by_down, by_dist, by_form, blitz_3rd, cov_3rd, by_hash, motion_tbl, sample_size, sr_overall, xpl_overall)
+
+st.subheader("Auto-Generated Game-Plan Suggestions (Universal)")
+for s in suggestions:
+    st.markdown(f"- {s}")
+
+st.markdown("### Quick Call-Sheet Buckets (Offense — Universal)")
+st.markdown("**Vs Pressure (esp. 3rd):** " + ", ".join(OFF_PRESSURE_ANSWERS))
+st.markdown("**Vs Man (3rd):** " + ", ".join(OFF_MAN_BEATERS))
+st.markdown("**Vs Cover 3 (MOFC):** " + ", ".join(OFF_C3_BEATERS))
+st.markdown("**Vs Quarters:** " + ", ".join(OFF_C4_BEATERS))
+st.markdown("**Screen Menu:** " + ", ".join(OFF_SCREEN_FAMILY))
+st.markdown("**Run Game:** " + ", ".join(RUN_GAME))
+
+# -----------------------
+# Playbook-Only Planner (No Opponent Data Required)
+# -----------------------
+st.subheader("Playbook-Only Planner (No Opponent Data)")
+lib = pd.DataFrame(st.session_state.PLAYBOOK.get('plays', []))
+if lib.empty:
+    st.info("Add plays to your Playbook Library above to generate a call sheet without opponent data.")
+else:
+    def _text_contains(text: str, keywords: list[str]) -> bool:
+        hay = str(text or '').lower()
+        return any(k in hay for k in keywords)
+
+    def _pick_varied(df: pd.DataFrame, keywords: list[str], limit: int = 6) -> pd.DataFrame:
+        mask = df.apply(lambda r: _text_contains((r.get('CONCEPT_TAGS','') + ' ' + r.get('SITUATION_TAGS','')), keywords), axis=1)
+        cand = df[mask].copy()
+        if cand.empty:
+            cand = df.copy()
+        picked = []
+        used_names, used_forms = set(), set()
+        for _, r in cand.iterrows():
+            name = r.get('PLAY_NAME'); form = r.get('FORMATION')
+            if name in used_names or form in used_forms:
+                continue
+            picked.append(r)
+            used_names.add(name); used_forms.add(form)
+            if len(picked) >= limit:
+                break
+        return pd.DataFrame(picked)
+
+    buckets = {
+        "1st & 10": ["1st&10","quick","inside zone","iz","outside zone","oz","power","counter","rpo","play-action","boot"],
+        "2nd & medium (4-6)": ["2nd&medium","quick","screen","draw","counter","boot","pa"],
+        "3rd & short (1-3)": ["3rd&1-3","hitch","slant","snag","mesh","iso","power","qb sneak"],
+        "3rd & medium (4-6)": ["3rd&4-6","snag","smash","flood","curl-flat","mesh","screen"],
+        "3rd & long (7-10)": ["3rd&7-10","dagger","flood","smash","screen","wheel"],
+        "Red Zone": ["rz","money","atm","smash","snag","fade","rub","pick"],
+        "2-minute": ["2-minute","hurry","sideline","dagger","curl-flat","out","arrow"],
+    }
+
+    def _detect_concept(row: pd.Series) -> str | None:
+        txt = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).upper()
+        for key in ['TRAIN','VIPER','UNICORN','UTAH']:
+            if key in txt:
+                return key
+        return None
+
+    rules = st.session_state.get('CONCEPT_FORMATION_RULES', {})
+    lib2 = lib.copy()
+    if not lib2.empty:
+        lib2['__CONCEPT__'] = lib2.apply(_detect_concept, axis=1)
+        mask_keep = []
+        for _, rr in lib2.iterrows():
+            ck = rr['__CONCEPT__']
+            if ck and rules.get(ck):
+                allowed = {s.upper() for s in rules[ck]}
+                form = str(rr.get('FORMATION','')).upper()
+                mask_keep.append(form in allowed)
+            else:
+                mask_keep.append(True)
+        lib2 = lib2[pd.Series(mask_keep, index=lib2.index)].drop(columns=['__CONCEPT__'])
+
+    call_rows = []
+    for bucket, keys in buckets.items():
+        picked = _pick_varied(lib2, [k.lower() for k in keys], limit=6)
+        if not picked.empty:
+            picked = picked[["PLAY_NAME","PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS","COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]]
+            picked.insert(0, "Bucket", bucket)
+            call_rows.append(picked)
+    if call_rows:
+        call_sheet = pd.concat(call_rows, ignore_index=True)
+
+        def _screen_concept(row: pd.Series) -> str | None:
+            txt = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).upper()
+            for key in ['TRAIN','VIPER','UNICORN','UTAH']:
+                if key in txt:
+                    return key
+            if 'SCREEN' in txt:
+                return 'SCREEN'
+            return None
+
+        order = st.session_state.get('SCREEN_RECIPIENT_ORDER', ['Y','Z','H','X','F'])
+
+        call_sheet = call_sheet.copy()
+        call_sheet["RECIPIENT_LETTER"] = ""
+        base_prefix = (call_sheet["FORMATION"].fillna("").str.strip() + " " + call_sheet["STRENGTH"].fillna("").str.strip()).str.strip()
+        call_sheet["CALL"] = base_prefix.where(base_prefix.eq(""), base_prefix + ". ") + call_sheet["PLAY_NAME"].fillna("")
+
+        screen_idx = [i for i in call_sheet.index if _screen_concept(call_sheet.loc[i])]
+        for j, idx in enumerate(screen_idx):
+            recip = order[j % len(order)]
+            concept = _screen_concept(call_sheet.loc[idx]) or 'SCREEN'
+            form = str(call_sheet.at[idx, 'FORMATION'] or '').strip()
+            strength = str(call_sheet.at[idx, 'STRENGTH'] or '').strip()
+            prefix = (form + (' ' + strength if strength else '')).strip()
+            call_sheet.at[idx, 'RECIPIENT_LETTER'] = recip
+            call_sheet.at[idx, 'CALL'] = (f"{prefix}. " if prefix else '') + f"{recip.lower()}-{concept.lower()}"
+
+        cols = ["Bucket","CALL","PLAY_NAME","RECIPIENT_LETTER","PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS","COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]
+        call_sheet = call_sheet[[c for c in cols if c in call_sheet.columns]]
+
+        st.dataframe(call_sheet)
+        st.download_button("⬇️ Download Call_Sheet_PlaybookOnly.csv", data=call_sheet.to_csv(index=False).encode("utf-8"), file_name="Call_Sheet_PlaybookOnly.csv", mime="text/csv")
+    else:
+        st.info("Could not find plays matching the standard buckets. Add situation tags like '1st&10', '3rd&7-10', or concept tags (Snag, Flood, Mesh, Smash, Dagger, Screen, IZ/OZ/Power/Counter).")
+
+# -----------------------
+# Offense-Focused Matchup Builder (Our O vs Their D)
+# -----------------------
+with st.expander("Offense-Focused Matchup Builder (Our O vs Their D)", expanded=False):
+    st.caption("Upload defensive data for the opponent and (optionally) our offensive data. We'll rank your Playbook Library plays by matchup fit: our best concepts vs their most-used coverages & pressure.")
+    opp_file = st.file_uploader("Opponent DEF Hudl CSV/Excel", type=["csv","xlsx"], key="oppdef")
+    off_file = st.file_uploader("Our OFF Hudl CSV/Excel (optional)", type=["csv","xlsx"], key="ouroff")
+
+    def _load_file(f):
+        if not f: return None
+        try:
+            return pd.read_excel(f, engine="openpyxl") if f.name.lower().endswith(".xlsx") else pd.read_csv(f)
+        except Exception:
+            try: return pd.read_csv(f)
+            except Exception: return None
+
+    def _prep_hudl(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df is False: return pd.DataFrame()
+        df = df.copy()
+        for c in ["DN","DIST","GN_LS"]:
+            df[c] = pd.to_numeric(df.get(c), errors="coerce")
+        def _succ(r):
+            dn, dist, g = r.get("DN"), r.get("DIST"), r.get("GN_LS")
+            if pd.isna(dn) or pd.isna(dist) or pd.isna(g): return np.nan
+            try: dn=int(dn); dist=float(dist); g=float(g)
+            except Exception: return np.nan
+            return (g >= 0.5*dist) if dn==1 else ((g >= 0.7*dist) if dn==2 else (g >= dist))
+        if "SUCCESS" not in df.columns:
+            df["SUCCESS"] = df.apply(_succ, axis=1)
+        return df
+
+    opp_df = _prep_hudl(_load_file(opp_file))
+    off_df = _prep_hudl(_load_file(off_file))
+
+    call_sheet_matchup = None
+    if not lib.empty and not opp_df.empty:
+        def _cov_norm(s: str) -> str:
+            s = str(s or '').upper()
+            if any(k in s for k in ["COVER 1", "C1", "MAN"]): return "MAN"
+            if any(k in s for k in ["COVER 3", "C3", "THREE"]): return "C3"
+            if any(k in s for k in ["COVER 4", "C4", "QUARTERS"]): return "C4"
+            if any(k in s for k in ["COVER 2", "C2", "TWO"]): return "C2"
+            return "UNK"
+
+        opp_cov = opp_df.copy()
+        cov_series = opp_cov.get("COVERAGE", pd.Series(index=opp_cov.index, dtype=object))
+        opp_cov["COVN"] = cov_series.astype(str).apply(_cov_norm)
+        cov_dist = opp_cov["COVN"].value_counts(normalize=True).to_dict()
+
+        blitz_3rd_tbl = compute_blitz_rate(opp_df[opp_df["DN"] == 3], ["DIST_BUCKET"]) if "DIST_BUCKET" in opp_df.columns and "DN" in opp_df.columns else pd.DataFrame()
+        opp_blitz3 = float(blitz_3rd_tbl["blitz_rate"].mean()) if len(blitz_3rd_tbl) else 0.0
+
+        concept_map = {
+            "mesh":["mesh"], "smash":["smash"], "flood":["flood","sail"], "dagger":["dagger"],
+            "curlflat":["curl flat","curl-flat","curl","flat"], "screen":["screen","bubble","tunnel"],
+            "iz":["inside zone","iz"], "oz":["outside zone","oz","stretch"], "power":["power"], "counter":["counter"],
+            "wheel":["wheel"], "hitch":["hitch"], "arrow":["arrow"], "stick":["stick","snag"],
+        }
+        def _infer_concepts(txt: str) -> list[str]:
+            t = str(txt or '').lower()
+            hits = [k for k, kws in concept_map.items() if any(kw in t for kw in kws)]
+            return hits or ["other"]
+
+        if off_df is not None and not off_df.empty:
+            txtcol = off_df.get("OFF_PLAY") if "OFF_PLAY" in off_df.columns else off_df.get("PLAY_TYPE", pd.Series(dtype=str))
+            tmp = pd.DataFrame({"concepts": txtcol.apply(_infer_concepts), "SUCCESS": off_df.get("SUCCESS")})
+            tmp = tmp.explode("concepts")
+            concept_success = tmp.groupby("concepts")["SUCCESS"].mean().to_dict()
+        else:
+            concept_success = {}
+
+        def _score_row(r: pd.Series) -> float:
+            score = 0.0
+            cov_tags = str(r.get('COVERAGE_TAGS','')).lower()
+            if 'vs man' in cov_tags: score += 1.2 * cov_dist.get('MAN', 0)
+            if 'vs c3' in cov_tags or 'vs cover 3' in cov_tags: score += 1.2 * cov_dist.get('C3', 0)
+            if 'vs quarters' in cov_tags or 'vs c4' in cov_tags or 'vs cover 4' in cov_tags: score += 1.2 * cov_dist.get('C4', 0)
+            if 'vs cover 2' in cov_tags or 'vs c2' in cov_tags: score += 1.2 * cov_dist.get('C2', 0)
+            if opp_blitz3 >= 0.35 and 'vs blitz' in str(r.get('PRESSURE_TAGS','')).lower(): score += 0.4
+            cons = str(r.get('CONCEPT_TAGS','')).lower()
+            hits = [k for k, kws in concept_map.items() if any(w in cons for w in kws)]
+            if hits:
+                score += float(np.mean([concept_success.get(k, 0.5) for k in hits]))
+            return float(score)
+
+        lib_scored = lib.copy()
+        lib_scored["__SCORE__"] = lib_scored.apply(_score_row, axis=1)
+
+        def _pick_top(df: pd.DataFrame, keywords: list[str], limit: int = 6) -> pd.DataFrame:
+            def _contains(row):
+                hay = (str(row.get('CONCEPT_TAGS','')) + ' ' + str(row.get('SITUATION_TAGS','')) + ' ' + str(row.get('PLAY_NAME',''))).lower()
+                return any(k in hay for k in keywords)
+            cand = df[df.apply(_contains, axis=1)].copy()
+            if cand.empty:
+                cand = df.copy()
+            cand = cand.sort_values("__SCORE__", ascending=False)
+            picked, used_names, used_forms = [], set(), set()
+            for _, rr in cand.iterrows():
+                name, form = rr.get('PLAY_NAME'), rr.get('FORMATION')
+                if name in used_names or form in used_forms:
+                    continue
+                picked.append(rr); used_names.add(name); used_forms.add(form)
+                if len(picked) >= limit:
+                    break
+            return pd.DataFrame(picked)
+
+        call_rows2 = []
+        for bucket, keys in {
+            "1st & 10": ["1st&10","quick","inside zone","iz","outside zone","oz","power","counter","rpo","play-action","boot"],
+            "2nd & medium (4-6)": ["2nd&medium","quick","screen","draw","counter","boot","pa"],
+            "3rd & short (1-3)": ["3rd&1-3","hitch","slant","snag","mesh","iso","power","qb sneak"],
+            "3rd & medium (4-6)": ["3rd&4-6","snag","smash","flood","curl-flat","mesh","screen"],
+            "3rd & long (7-10)": ["3rd&7-10","dagger","flood","smash","screen","wheel"],
+            "Red Zone": ["rz","money","atm","smash","snag","fade","rub","pick"],
+            "2-minute": ["2-minute","hurry","sideline","dagger","curl-flat","out","arrow"],
+        }.items():
+            got = _pick_top(lib_scored, [k.lower() for k in keys], limit=6)
+            if not got.empty:
+                got = got[["PLAY_NAME","PERSONNEL","FORMATION","STRENGTH","CONCEPT_TAGS","SITUATION_TAGS","COVERAGE_TAGS","PRESSURE_TAGS","FILE_NAME"]]
+                got.insert(0, "Bucket", bucket)
+                call_rows2.append(got)
+
+        if call_rows2:
+            call_sheet_matchup = pd.concat(call_rows2, ignore_index=True)
+            base_prefix = (call_sheet_matchup["FORMATION"].fillna("").str.strip() + " " + call_sheet_matchup["STRENGTH"].fillna("").str.strip()).str.strip()
+            call_sheet_matchup["CALL"] = base_prefix.where(base_prefix.eq(""), base_prefix + ". ") + call_sheet_matchup["PLAY_NAME"].fillna("")
+
+            st.success("Built matchup-optimized call sheet from library + opponent profile.")
+            st.dataframe(call_sheet_matchup)
+            st.download_button("⬇️ Download Call_Sheet_Matchup.csv", data=call_sheet_matchup.to_csv(index=False).encode("utf-8"), file_name="Call_Sheet_Matchup.csv", mime="text/csv")
+
+            call_sheet = call_sheet_matchup
+        else:
+            st.info("No matchup picks found — add tags like 'vs Man / vs C3 / vs Quarters / vs Blitz' in your play index.")
+
+# -----------------------
+# Printable One-Pager (uses call_sheet from either planner)
+# -----------------------
+try:
+    if 'call_sheet' in locals() and isinstance(call_sheet, pd.DataFrame) and not call_sheet.empty:
+        st.subheader("Printable One-Pager")
+        st.caption("Thumbnails match by FORMATION + PLAY NAME (motions ignored). Provide FILE_NAME to override.")
+        include_imgs = st.checkbox("Include play art (from uploaded images)", True)
+        thumb_px = st.slider("Thumbnail size (px)", 60, 140, 90, 10)
+        images_map = st.session_state.PLAYBOOK.get('images', {})
+
+        def _guess_mime(name):
+            n = str(name or '').lower()
+            if n.endswith(('.jpg','.jpeg')): return 'image/jpeg'
+            if n.endswith('.webp'): return 'image/webp'
+            return 'image/png'
+
+        def _canon(s: str) -> str:
+            import re, unicodedata
+            t = unicodedata.normalize('NFKD', str(s or '')).encode('ascii','ignore').decode('ascii')
+            t = t.lower().replace('&', 'and')
+            return re.sub(r'[^a-z0-9]+', '', t)
+
+        def _strip_motions(txt: str) -> str:
+            if not txt: return ''
+            letters = set("XYHZF")
+            known = {"OVER","RETURN","FLY","ORBIT","CLOSE","FLASH","YOYO","YO-YO","TIP"}
+            kept = []
+            for tok in str(txt).split():
+                if '-' in tok:
+                    a, b = tok.split('-', 1)
+                    if len(a) == 1 and a.upper() in letters and b.replace('-', '').upper() in known:
+                        continue
+                kept.append(tok)
+            return ' '.join(kept).strip()
+
+        def _after_dot(s: str) -> str:
+            s = str(s or '')
+            return s.split('. ', 1)[1] if '. ' in s else s
+
+        def _find_best_image_for(row) -> str | None:
+            fn = str(row.get('FILE_NAME') or '').strip()
+            if fn and fn in images_map:
+                return fn
+            call = row.get('CALL','') or ''
+            pname = row.get('PLAY_NAME','') or ''
+            formation = str(row.get('FORMATION','') or '')
+            strength = str(row.get('STRENGTH','') or '')
+            base_from_call = _strip_motions(_after_dot(call))
+            base_from_pname = _after_dot(pname)
+            candidate_texts = []
+            for base in [base_from_call, base_from_pname]:
+                if base:
+                    candidate_texts.append(f"{formation} {base}")
+                    if strength:
+                        candidate_texts.append(f"{formation} {strength} {base}")
+                    candidate_texts.append(base)
+            if pname:
+                candidate_texts.append(pname.replace('. ', ' '))
+            from difflib import SequenceMatcher
+            keynorms = [_canon(t) for t in candidate_texts if t]
+            filenorm = {fname: _canon(Path(fname).stem) for fname in images_map.keys()}
+            best_name, best_score = None, 0.0
+            play_piece = _canon(base_from_call or base_from_pname)
+            form_piece = _canon(formation + (' ' + strength if strength else ''))
+            for fname, fstem in filenorm.items():
+                for kn in keynorms:
+                    if not kn: continue
+                    score = SequenceMatcher(None, fstem, kn).ratio()
+                    if play_piece and play_piece in fstem: score += 0.25
+                    if form_piece and form_piece in fstem: score += 0.20
+                    if play_piece and form_piece and (play_piece in fstem and form_piece in fstem): score += 0.20
+                    if kn in fstem or fstem in kn: score += 0.10
+                    if score > best_score:
+                        best_score, best_name = score, fname
+            return best_name if (best_name and best_score >= 0.55) else None
+
+        def _img_tag_for_row(row):
+            if not include_imgs or not images_map:
+                return ''
+            fname = _find_best_image_for(row)
+            if not fname:
+                return ''
+            b = images_map.get(fname)
+            if not b:
+                return ''
+            mime = _guess_mime(fname)
+            b64 = base64.b64encode(b).decode('utf-8')
+            return f'<img class="thumb" src="data:{mime};base64,{b64}" />'
+
+        def _esc(s):
+            try:
+                import html as _html
+                return _html.escape('' if s is None else str(s))
+            except Exception:
+                return str(s)
+
+        parts = []
+        parts.append(f"""
+        <style>
+        @media print {{
+          @page {{ size: Letter landscape; margin: 0.35in; }}
+          body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+        }}
+        body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
+        .bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
+        .bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
+        .row {{ display:flex; align-items:center; gap:8px; padding:6px 10px; border-top:1px solid #eee; }}
+        .thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; }}
+        .main {{ font-weight:700; font-size:14px; }}
+        .meta {{ font-size:12px; color:#334155; }}
+        </style>
+        """)
+
+        for bucket, dfb in call_sheet.groupby('Bucket', sort=False):
+            parts.append(f'<div class="bucket"><div class="bktitle">{_esc(bucket)}</div>')
+            for _, r in dfb.iterrows():
+                call = _esc(r.get('CALL',''))
+                form = _esc(r.get('FORMATION','')); strn = _esc(r.get('STRENGTH',''))
+                pers = _esc(r.get('PERSONNEL',''))
+                recip = _esc(r.get('RECIPIENT_LETTER',''))
+                cov = _esc(r.get('COVERAGE_TAGS','')); press = _esc(r.get('PRESSURE_TAGS',''))
+                situ = _esc(r.get('SITUATION_TAGS',''))
+                concept = _esc(r.get('CONCEPT_TAGS',''))
+                img = _img_tag_for_row(r)
+                meta_bits = [x for x in [f"{form} {strn}".strip(), f"Pers {pers}" if pers else '', f"Recipient {recip}" if recip else '', situ] if x]
+                meta_line = ' | '.join(meta_bits)
+                tags_line = ' • '.join([x for x in [concept, cov, press] if x])
+                parts.append(f'''
+                  <div class="row">
+                    {img if img else ''}
+                    <div>
+                      <div class="main">{call}</div>
+                      <div class="meta">{_esc(meta_line)}</div>
+                      {f'<div class="meta">{_esc(tags_line)}</div>' if tags_line else ''}
+                    </div>
+                  </div>
+                ''')
+            parts.append('</div>')
+        html_str = "
+".join(parts)
+        st.components.v1.html(html_str, height=800, scrolling=True)
+        st.download_button("⬇️ Download OC_OnePager.html", data=html_str.encode('utf-8'), file_name="OC_OnePager.html", mime="text/html")
+except Exception as _e:
+    st.warning(f"One-Pager build skipped: {_e}")
