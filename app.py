@@ -812,8 +812,54 @@ else:
         st.info("Could not find plays matching the standard buckets. Add situation tags like '1st&10', '3rd&7-10', or concept tags (Snag, Flood, Mesh, Smash, Dagger, Screen, IZ/OZ/Power/Counter).")
 
 # -----------------------
-# Printable One-Pager (Call Sheet with Thumbnails) — motions removed, image column left
+# Offense-Focused Matchup Builder (Our O vs Their D)
 # -----------------------
+with st.expander("Offense-Focused Matchup Builder (Our O vs Their D)", expanded=False):
+    st.caption("Upload defensive data for the opponent and (optionally) our offensive data. We'll rank your Playbook Library plays by matchup fit: our best concepts vs their most-used coverages & pressure.")
+    opp_file = st.file_uploader("Opponent DEF Hudl CSV/Excel", type=["csv","xlsx"], key="oppdef")
+    off_file = st.file_uploader("Our OFF Hudl CSV/Excel (optional)", type=["csv","xlsx"], key="ouroff")
+
+    def _load_file(f):
+        if not f: return None
+        try:
+            return pd.read_excel(f, engine="openpyxl") if f.name.lower().endswith(".xlsx") else pd.read_csv(f)
+        except Exception:
+            try:
+                return pd.read_csv(f)
+            except Exception:
+                return None
+
+    opp_df = _load_file(opp_file)
+    off_df = _load_file(off_file)
+
+    def _prep_hudl(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None: return pd.DataFrame()
+        df = df.copy()
+        for c in ["DN","DIST","GN_LS"]; df[c] = pd.to_numeric(df.get(c), errors="coerce")
+        def _succ(r):
+            dn, dist, g = r.get("DN"), r.get("DIST"), r.get("GN_LS")
+            if pd.isna(dn) or pd.isna(dist) or pd.isna(g): return np.nan
+            try: dn=int(dn); dist=float(dist); g=float(g)
+            except Exception: return np.nan
+            return (g >= 0.5*dist) if dn==1 else ((g >= 0.7*dist) if dn==2 else (g >= dist))
+        if "SUCCESS" not in df.columns: df["SUCCESS"] = df.apply(_succ, axis=1)
+        return df
+
+    opp_df = _prep_hudl(opp_df)
+    off_df = _prep_hudl(off_df)
+
+    call_sheet_matchup = None
+    if not lib.empty and not opp_df.empty:
+        # --- Opponent coverage & pressure profile ---
+        def _cov_norm(s: str) -> str:
+            s = str(s or '').upper()
+            if any(k in s for k in ["COVER 1","C1","MAN"]): return "MAN"
+            if any(k in s for k in ["COVER 3","C3","THREE"]): return "C3"
+            if any(k in s for k in ["COVER 4","C4","QUARTERS"]): return "C4"
+            if any(k in s for k in ["COVER 2","C2","TWO"]): return "C2"
+            return "UNK"
+        opp_cov = opp_df.copy(); opp_cov["COVN"] = opp_cov.get("COVERAGE","").apply(_cov_norm)
+        cov_dist = (opp_cov["COVN"].value_counts(normalize=
 try:
     if 'call_sheet' in locals() and isinstance(call_sheet, pd.DataFrame) and not call_sheet.empty:
         st.subheader("Printable One-Pager")
@@ -848,201 +894,3 @@ try:
                     a, b = tok.split('-', 1)
                     if len(a) == 1 and a.upper() in letters:
                         if b.replace('-', '').upper() in known:
-                            continue
-                toks.append(tok)
-            return ' '.join(toks)
-
-        from difflib import SequenceMatcher
-
-        def _best_image_for(formation: str, play_name: str) -> str | None:
-            if not images_map:
-                return None
-            form = (formation or "")
-            play = (play_name or "")
-            candidates = [
-                f"{form} {play}",
-                play,
-                f"{form} {_strip_motions(play)}",
-            ]
-            keynorms = [_canon(t) for t in candidates if t]
-            filenorm = {fnm: _canon(Path(fnm).stem) for fnm in images_map.keys()}
-            best_fn, best_score = None, 0.0
-            form_norm = _canon(form)
-            play_norm = _canon(play)
-            for fname, fstem in filenorm.items():
-                for kn in keynorms:
-                    if not kn:
-                        continue
-                    score = SequenceMatcher(None, fstem, kn).ratio()
-                    if play_norm and play_norm in fstem:
-                        score += 0.25
-                    if form_norm and form_norm in fstem:
-                        score += 0.20
-                    if score > best_score:
-                        best_score, best_fn = score, fname
-            if best_fn and best_score >= 0.55:
-                return best_fn
-            return None
-
-        def _img_tag_from_row(r):
-            if not include_imgs:
-                return ""
-            explicit = str(r.get('FILE_NAME') or '').strip()
-            fn = explicit or _best_image_for(r.get('FORMATION',''), r.get('PLAY_NAME',''))
-            if not fn:
-                return ""
-            b = images_map.get(fn)
-            if not b:
-                return ""
-            mime = _guess_mime(fn)
-            b64 = base64.b64encode(b).decode('utf-8')
-            return f'<img class="thumb" alt="" src="data:{mime};base64,{b64}" />'
-
-        def _esc(s):
-            try:
-                import html as _html
-                return _html.escape('' if s is None else str(s))
-            except Exception:
-                return str(s)
-
-        parts = []
-        parts.append(f'''
-<style>
-@media print {{
-  @page {{ size: Letter landscape; margin: 0.35in; }}
-  body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-}}
-body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
-.note {{ font-size:12px; color:#475569; margin: 4px 0 10px; }}
-.bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
-.bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
-.row {{
-  display:grid;
-  grid-template-columns: {thumb_px}px 1fr;
-  align-items:center;
-  gap:12px;
-  padding:6px 10px;
-  border-top:1px solid #eee;
-}}
-.thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; background:white; }}
-.imgcell {{ width:{thumb_px}px; height:{thumb_px}px; display:flex; align-items:center; justify-content:center; }}
-.main {{ font-weight:700; font-size:14px; }}
-.meta {{ font-size:12px; color:#334155; }}
-</style>
-<div class="note">Art is matched by <b>FORMATION + PLAY NAME</b>, ignoring motion. You can override per-row by setting FILE_NAME in your play index.</div>
-''')
-
-        for bucket, dfb in call_sheet.groupby('Bucket', sort=False):
-            parts.append(f'<div class="bucket"><div class="bktitle">{_esc(bucket)}</div>')
-            for _, r in dfb.iterrows():
-                call = _esc(r.get('CALL',''))
-                form = _esc(r.get('FORMATION','')); strn = _esc(r.get('STRENGTH',''))
-                pers = _esc(r.get('PERSONNEL',''))
-                recip = _esc(r.get('RECIPIENT_LETTER',''))
-                cov = _esc(r.get('COVERAGE_TAGS','')); press = _esc(r.get('PRESSURE_TAGS',''))
-                situ = _esc(r.get('SITUATION_TAGS',''))
-                concept = _esc(r.get('CONCEPT_TAGS',''))
-                meta_bits = [x for x in [
-                    f"{form} {strn}".strip(),
-                    f"Pers {pers}" if pers else '',
-                    f"Recipient {recip}" if recip else '',
-                    situ
-                ] if x]
-                meta_line = ' | '.join(meta_bits)
-                tags_line = ' • '.join([x for x in [concept, cov, press] if x])
-                img_html = _img_tag_from_row(r)
-                parts.append(f'''
-  <div class="row">
-    <div class="imgcell">{img_html}</div>
-    <div>
-      <div class="main">{call}</div>
-      <div class="meta">{_esc(meta_line)}</div>
-      {f'<div class="meta">{_esc(tags_line)}</div>' if tags_line else ''}
-    </div>
-  </div>
-''')
-            parts.append('</div>')
-
-        html_str = "
-".join(parts)
-        st.components.v1.html(html_str, height=800, scrolling=True)
-        st.download_button("⬇️ Download OC_OnePager.html", data=html_str.encode('utf-8'), file_name="OC_OnePager.html", mime="text/html")
-        onepager_html = html_str
-except Exception as _e:
-    st.warning(f"One-Pager build skipped: {_e}")
-
-# -----------------------
-# Exports (CSVs + Markdown)
-# -----------------------
-outputs = {
-    "overall_tendencies.csv": overall,
-    "tendency_by_down.csv": by_down,
-    "tendency_by_down_distance.csv": by_dist,
-    "tendency_by_formation.csv": by_form,
-    "tendency_by_direction.csv": by_dir,
-    "tendency_by_field_zone.csv": by_fz,
-    "tendency_red_zone_by_down.csv": by_rz,
-    "blitz_rate_third_down.csv": blitz_3rd,
-    "coverage_third_down.csv": cov_3rd,
-    "motion_usage.csv": motion_tbl,
-}
-
-# Build Markdown report
-md_lines = []
-md_lines.append(f"# Tendency & Game Plan Report — {custom_team} (Universal)")
-md_lines.append("")
-md_lines.append("## Overview")
-if len(overall):
-    for _, r in overall.sort_values("plays", ascending=False).iterrows():
-        md_lines.append(f"- {r['PLAY_TYPE_NORM']}: {int(r['plays'])} plays ({r['%']}%)")
-if not np.isnan(sr_overall): md_lines.append(f"- Success rate: {sr_overall:.0%}")
-if not np.isnan(xpl_overall): md_lines.append(f"- Explosive rate: {xpl_overall:.0%}")
-md_lines.append("")
-md_lines.append("## Key Tendencies")
-md_lines.extend([
-    "- By Down: see tendency_by_down.csv",
-    "- By Down & Distance: see tendency_by_down_distance.csv",
-    "- By Formation/Strength/Backfield: see tendency_by_formation.csv",
-    "- Direction (Left/Middle/Right): see tendency_by_direction.csv",
-    "- Field Zones & Red Zone: see tendency_by_field_zone.csv and tendency_red_zone_by_down.csv",
-    "- Blitz & Coverage on 3rd Down: see blitz_rate_third_down.csv and coverage_third_down.csv",
-    "- Motion Usage: see motion_usage.csv",
-])
-md_lines.append("")
-md_lines.append("## Game-Plan Suggestions (Universal)")
-for s in suggestions: md_lines.append(f"- {s}")
-md_lines.append("")
-md_lines.append(
-    "> Map to call sheet: Pressure answers (screens/quick/hot), Man (mesh/rubs/option/BS fade), Cover 3 (Flood/Curl-Flat/Dagger), Quarters (Posts/Benders/Scissors)."
-)
-md_text = "
-".join(md_lines)
-
-st.download_button(
-    label="⬇️ Download GamePlan_Suggestions.md",
-    data=md_text.encode("utf-8"),
-    file_name="GamePlan_Suggestions.md",
-    mime="text/markdown",
-)
-
-# Zip of CSV outputs
-zip_buf = io.BytesIO()
-with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-    for fname, df in outputs.items():
-        zf.writestr(fname, df.to_csv(index=False))
-    # Include playbook-only call sheet if it exists
-    try:
-        if 'call_sheet' in locals():
-            zf.writestr("call_sheet_playbook_only.csv", call_sheet.to_csv(index=False))
-    except Exception:
-        pass
-    zf.writestr("GamePlan_Suggestions.md", md_text)
-
-st.download_button(
-    label="⬇️ Download All Outputs (.zip)",
-    data=zip_buf.getvalue(),
-    file_name="hudl_tendencies_outputs.zip",
-    mime="application/zip",
-)
-
-st.success("Done. Use diagnostics above to fill any missing columns, then review tendencies and game-plan notes. Use the Playbook Library + Google Sheets to persist your calls.")
