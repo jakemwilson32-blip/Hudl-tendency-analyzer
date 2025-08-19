@@ -780,96 +780,113 @@ else:
         st.dataframe(call_sheet)
         st.download_button("⬇️ Download Call_Sheet_PlaybookOnly.csv", data=call_sheet.to_csv(index=False).encode("utf-8"), file_name="Call_Sheet_PlaybookOnly.csv", mime="text/csv")
 
-        # ----- Printable One-Pager (Ratings + Badges, image on right) -----
-        try:
-            images_map = st.session_state.PLAYBOOK.get('images', {})
-            include_imgs = st.checkbox("Include play art (from uploaded images)", True, key="onepager_imgs")
-            thumb_px = st.slider("Thumbnail size (px)", 60, 140, 90, 10, key="onepager_thumb")
-            def _canon(s: str) -> str:
-                import re, unicodedata
-                t = unicodedata.normalize('NFKD', str(s or '')).encode('ascii','ignore').decode('ascii')
-                return re.sub(r'[^a-z0-9]+','', t.lower())
-            def _guess_mime(name):
-                n = str(name or '').lower()
-                if n.endswith(('.jpg','.jpeg')): return 'image/jpeg'
-                if n.endswith('.webp'): return 'image/webp'
-                return 'image/png'
-            def _find_image(row) -> Optional[str]:
-                fn = str(row.get('FILE_NAME') or '').strip()
-                if fn and fn in images_map: return fn
-                # simple fuzzy: match by play name against filename stem
-                pname = _canon(row.get('PLAY_NAME',''))
-                best,score=None,0.0
-                for fname in images_map.keys():
-                    stem = _canon(Path(fname).stem)
-                    sc = 1.0 if pname and pname in stem else 0.0
-                    if sc>score: best,score=fname,sc
-                return best if score>=1.0 else None
-            def _img_tag(row):
-                if not include_imgs or not images_map: return ''
-                fn = _find_image(row)
-                if not fn: return ''
-                b = images_map.get(fn)
-                if not b: return ''
-                import base64
-                b64 = base64.b64encode(b).decode('utf-8')
-                return f"<img class='thumb' src='data:{_guess_mime(fn)};base64,{b64}' />"
-            def _esc(x):
-                import html as _html
-                return _html.escape('' if x is None else str(x))
-            parts = []
+# ----- Printable One-Pager (Ratings + Badges, image on right) -----
+try:
+    images_map = st.session_state.PLAYBOOK.get('images', {})
+    include_imgs = st.checkbox("Include play art (from uploaded images)", True, key="onepager_imgs")
+    thumb_px = st.slider("Thumbnail size (px)", 60, 140, 90, 10, key="onepager_thumb")
+
+    def _canon(s: str) -> str:
+        import re, unicodedata
+        t = unicodedata.normalize('NFKD', str(s or '')).encode('ascii','ignore').decode('ascii')
+        return re.sub(r'[^a-z0-9]+','', t.lower())
+
+    def _guess_mime(name):
+        n = str(name or '').lower()
+        if n.endswith(('.jpg','.jpeg')): return 'image/jpeg'
+        if n.endswith('.webp'): return 'image/webp'
+        return 'image/png'
+
+    def _find_image(row) -> Optional[str]:
+        fn = str(row.get('FILE_NAME') or '').strip()
+        if fn and fn in images_map:
+            return fn
+        pname = _canon(row.get('PLAY_NAME',''))
+        best, score = None, 0.0
+        for fname in images_map.keys():
+            stem = _canon(Path(fname).stem)
+            sc = 1.0 if pname and pname in stem else 0.0
+            if sc > score:
+                best, score = fname, sc
+        return best if score >= 1.0 else None
+
+    def _img_tag(row):
+        if not include_imgs or not images_map:
+            return ''
+        fn = _find_image(row)
+        if not fn:
+            return ''
+        b = images_map.get(fn)
+        if not b:
+            return ''
+        b64 = base64.b64encode(b).decode('utf-8')
+        return f"<img class='thumb' src='data:{_guess_mime(fn)};base64,{b64}' />"
+
+    def _esc(x):
+        import html as _html
+        return _html.escape('' if x is None else str(x))
+
+    parts = []
+    parts.append(f"""
+    <style>
+    @media print {{
+      @page {{ size: Letter landscape; margin: 0.35in; }}
+      body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    }}
+    body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
+    .bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
+    .bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
+    .row {{ display:flex; align-items:flex-start; gap:10px; padding:8px 10px; border-top:1px solid #eee; }}
+    .info {{ flex:1 1 auto; min-width:0; }}
+    .thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; margin-left:auto; }}
+    .main {{ font-weight:700; font-size:14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
+    .stars {{ color:#f59e0b; }}
+    .badges {{ opacity:0.9; }}
+    .meta {{ font-size:12px; color:#334155; }}
+    </style>
+    """)
+
+    for bucket, dfb in call_sheet.groupby('Bucket', sort=False):
+        parts.append(f"<div class='bucket'><div class='bktitle'>{_esc(bucket)}</div>")
+        for _, r in dfb.iterrows():
+            name = _esc(r.get('PLAY_NAME',''))
+            stars = '⭐' * int(r.get('PRIORITY', 1))
+            badges = _esc(r.get('ICONS',''))
+            form = _esc(r.get('FORMATION',''))
+            strn = _esc(r.get('STRENGTH',''))
+            pers = _esc(r.get('PERSONNEL',''))
+            cov = _esc(r.get('COVERAGE_TAGS',''))
+            press = _esc(r.get('PRESSURE_TAGS',''))
+            situ = _esc(r.get('SITUATION_TAGS',''))
+            concept = _esc(r.get('CONCEPT_TAGS',''))
+            meta_bits = [x for x in [f"{form} {strn}".strip(), f"Pers {pers}" if pers else '', situ] if x]
+            meta_line = ' | '.join(meta_bits)
+            tags_line = ' • '.join([x for x in [concept, cov, press] if x])
+            img = _img_tag(r)
             parts.append(f"""
-            <style>
-            @media print {{
-              @page {{ size: Letter landscape; margin: 0.35in; }}
-              body {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
-            }}
-            body {{ font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }}
-            .bucket {{ margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; }}
-            .bktitle {{ background:#0f172a; color:white; padding:6px 10px; font-weight:700; }}
-            .row {{ display:flex; align-items:flex-start; gap:10px; padding:8px 10px; border-top:1px solid #eee; }}
-            .info {{ flex:1 1 auto; min-width:0; }}
-            .thumb {{ width: {thumb_px}px; height:{thumb_px}px; object-fit:contain; border:1px solid #ccc; border-radius:6px; margin-left:auto; }}
-            .main {{ font-weight:700; font-size:14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
-            .stars {{ color:#f59e0b; }}
-            .badges {{ opacity:0.9; }}
-            .meta {{ font-size:12px; color:#334155; }}
-            </style>
+              <div class='row'>
+                <div class='info'>
+                  <div class='main'>{name} <span class='stars'>{stars}</span> <span class='badges'>{badges}</span></div>
+                  <div class='meta'>{_esc(meta_line)}</div>
+                  {f"<div class='meta'>{_esc(tags_line)}</div>" if tags_line else ''}
+                </div>
+                {img}
+              </div>
             """)
-            for bucket, dfb in call_sheet.groupby('Bucket', sort=False):
-                parts.append(f"<div class='bucket'><div class='bktitle'>{_esc(bucket)}</div>")
-                for _, r in dfb.iterrows():
-                    name=_esc(r.get('PLAY_NAME',''))
-                    stars='⭐'*int(r.get('PRIORITY',1))
-                    badges=_esc(r.get('ICONS',''))
-                    form=_esc(r.get('FORMATION','')); strn=_esc(r.get('STRENGTH',''))
-                    pers=_esc(r.get('PERSONNEL',''))
-                    cov=_esc(r.get('COVERAGE_TAGS','')); press=_esc(r.get('PRESSURE_TAGS',''))
-                    situ=_esc(r.get('SITUATION_TAGS',''))
-                    concept=_esc(r.get('CONCEPT_TAGS',''))
-                    meta_bits=[x for x in [f"{form} {strn}".strip(), f"Pers {pers}" if pers else '', situ] if x]
-                    meta_line=' | '.join(meta_bits)
-                    tags_line=' • '.join([x for x in [concept, cov, press] if x])
-                    img=_img_tag(r)
-                    parts.append(f"""
-                      <div class='row'>
-                        <div class='info'>
-                          <div class='main'>{name} <span class='stars'>{stars}</span> <span class='badges'>{badges}</span></div>
-                          <div class='meta'>{_esc(meta_line)}</div>
-                          {f"<div class='meta'>{_esc(tags_line)}</div>" if tags_line else ''}
-                        </div>
-                        {img}
-                      </div>
-                    """)
-                parts.append("</div>")
-            html_str = "
-".join(parts)
-            st.components.v1.html(html_str, height=800, scrolling=True)
-            st.download_button("⬇️ Download OC_OnePager_v2.html", data=html_str.encode('utf-8'), file_name="OC_OnePager_v2.html", mime="text/html")
-        except Exception as _e:
-            st.warning(f"One-Pager build skipped: {_e}")
-    else:
-        st.info("Could not find plays matching the standard buckets. Add situation tags like '1st&10', '3rd&7-10', or concept tags (Snag, Flood, Mesh, Smash, Dagger, Screen, IZ/OZ/Power/Counter).")
+        parts.append("</div>")
+
+    # ✅ FIX: terminate the string correctly
+    html_str = "\n".join(parts)
+
+    st.components.v1.html(html_str, height=800, scrolling=True)
+    st.download_button(
+        "⬇️ Download OC_OnePager_v2.html",
+        data=html_str.encode('utf-8'),
+        file_name="OC_OnePager_v2.html",
+        mime="text/html",
+    )
+except Exception as _e:
+    st.warning(f"One-Pager build skipped: {_e}")
 
 # -----------------------
 # Offense-Focused Matchup Builder
