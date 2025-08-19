@@ -387,12 +387,50 @@ with col_pb1:
         except Exception as e:
             st.error(f"Couldn't load playbook.json: {e}")
 
-    st.markdown("**Upload play images** (PNG/JPG). Name files to match FILE_NAME in your index.")
-    img_files = st.file_uploader("Add play screenshots/diagrams", type=["png","jpg","jpeg"], accept_multiple_files=True, key="pbimgs")
-    if img_files:
-        for f in img_files:
-            st.session_state.PLAYBOOK['images'][f.name] = f.read()
-        st.success(f"Stored {len(img_files)} image(s) in your library (in-memory).")
+st.markdown("**Upload play images** (PNG/JPG or ZIP). Name files to match FILE_NAME in your index.")
+uploads = st.file_uploader(
+    "Add play screenshots/diagrams (PNG/JPG or .zip)",
+    type=["png","jpg","jpeg","zip"],
+    accept_multiple_files=True,
+    key="pbimgs",
+)
+if uploads:
+    added, added_from_zip, skipped = 0, 0, 0
+    for f in uploads:
+        fname = f.name
+        lower = fname.lower()
+        if lower.endswith(".zip"):
+            # Unpack images from the zip (flatten folders)
+            try:
+                zbytes = f.read()
+                with zipfile.ZipFile(io.BytesIO(zbytes)) as zf:
+                    for zi in zf.infolist():
+                        if zi.is_dir():
+                            continue
+                        ext = Path(zi.filename).suffix.lower()
+                        if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+                            continue
+                        try:
+                            b = zf.read(zi.filename)
+                            key = Path(zi.filename).name  # drop any folder paths
+                            st.session_state.PLAYBOOK['images'][key] = b
+                            added += 1
+                            added_from_zip += 1
+                        except Exception:
+                            skipped += 1
+            except Exception as e:
+                st.error(f"Couldn't read zip '{fname}': {e}")
+        else:
+            # Single image file
+            st.session_state.PLAYBOOK['images'][fname] = f.read()
+            added += 1
+    msg = f"Stored {added} image(s)"
+    if added_from_zip:
+        msg += f" ({added_from_zip} from zip)"
+    if skipped:
+        msg += f"; skipped {skipped} file(s) that weren't images or couldn't be read"
+    msg += " in your library (in-memory)."
+    st.success(msg)
 
     st.markdown("**Index your plays with a CSV** (or add rows manually).")
     st.download_button("Download Play Index CSV Template", data=play_index_template_bytes(), file_name="play_index_template.csv", mime="text/csv")
